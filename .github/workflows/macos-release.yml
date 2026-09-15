@@ -65,12 +65,13 @@ jobs:
           names = ("APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID")
           with open(os.environ["GITHUB_ENV"], "a") as output:
               for name in names:
-                  value = os.environ[name].strip()
+                  value = os.environ[name].strip().lstrip("\ufeff").strip()
                   if name == "APPLE_CERTIFICATE":
                       value = "".join(value.split())
                       base64.b64decode(value, validate=True)
                   if not value or "\n" in value or "\r" in value:
                       raise ValueError("Invalid signing input: " + name)
+                  print("::add-mask::" + value)
                   output.write(name + "=" + value + "\n")
           PY
 
