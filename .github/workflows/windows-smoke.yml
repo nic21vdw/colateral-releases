@@ -1,0 +1,114 @@
+name: Windows 1.0.58 installer smoke
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  RELEASES: nic21vdw/colateral-releases
+jobs:
+  windows:
+    if: github.actor == 'nic21vdw'
+    runs-on: windows-latest
+    steps:
+
+      - name: Download the published installer
+        shell: bash
+        run: |
+          gh release download "v1.0.58" --repo "$RELEASES" \
+            --pattern '*-setup.exe' --dir dl
+          ls -la dl
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Install silently, as a user without admin rights
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem dl\*.exe)[0].FullName
+          Start-Process -WindowStyle Hidden -FilePath $exe -ArgumentList '/S' -Wait
+
+          $keys = @(
+            'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
+          )
+          $entry = Get-ItemProperty $keys -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like '*CoLateral*' } | Select-Object -First 1
+          if (-not $entry) {
+            Write-Host "::error::the silent install registered nothing in Add/Remove Programs"
+            exit 1
+          }
+          Write-Host "DisplayName: $($entry.DisplayName)  version: $($entry.DisplayVersion)"
+
+          $root = $entry.InstallLocation.Trim('"')
+          Write-Host "install location: $root"
+          if (-not (Test-Path $root)) {
+            Write-Host "::error::Add/Remove Programs points at $root, which does not exist"
+            exit 1
+          }
+          Get-ChildItem $root | Select-Object Name, Length | Format-Table
+
+          $install = Get-ChildItem $root -Filter '*.exe' |
+            Where-Object { $_.Name -notmatch 'uninstall' } | Select-Object -First 1
+          if (-not $install) {
+            Write-Host "::error::no application executable in $root, only an uninstaller"
+            exit 1
+          }
+          Write-Host "installed: $($install.FullName)"
+          "APP_EXE=$($install.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "APP_VERSION=$($entry.DisplayVersion)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: The installed version is the version that was tagged
+        shell: pwsh
+        run: |
+          $expected = 'v1.0.58'.TrimStart('v')
+          if ($env:APP_VERSION -ne $expected) {
+            Write-Host "::error::installed version $env:APP_VERSION does not match the tag $expected"
+            exit 1
+          }
+          Write-Host "installed version $env:APP_VERSION matches the tag."
+
+      - name: The bridge shipped beside the app
+        shell: pwsh
+        run: |
+          $root = Split-Path $env:APP_EXE
+          $bridge = Get-ChildItem $root -Recurse -Filter 'bridge.mjs' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $bridge) {
+            Write-Host "::error::bridge.mjs did not ship, so the agent terminal cannot start even with node present"
+            Get-ChildItem $root -Recurse -Depth 2 | Select-Object -First 40 FullName
+            exit 1
+          }
+          Write-Host "bridge present: $($bridge.FullName)"
+
+          $pty = Get-ChildItem $root -Recurse -Filter '*.node' -ErrorAction SilentlyContinue | Select-Object -First 3
+          if (-not $pty) {
+            Write-Host "::error::no native .node binding shipped beside the bridge; the terminal would fail to load node-pty"
+            exit 1
+          }
+          $pty | ForEach-Object { Write-Host "native binding: $($_.FullName)" }
+
+      - name: The app starts and stays up, with no node on PATH
+        shell: pwsh
+        run: |
+          $original = $env:PATH
+          $env:PATH = ($original -split ';' | Where-Object { $_ -notmatch 'nodejs|npm' }) -join ';'
+          $proc = Start-Process -WindowStyle Hidden -FilePath $env:APP_EXE -PassThru -ErrorAction Stop
+          $env:PATH = $original
+          Start-Sleep -Seconds 25
+          if ($proc.HasExited) {
+            Write-Host "::error::the app exited within 25 seconds of launch (exit code $($proc.ExitCode))"
+            exit 1
+          }
+          Write-Host "app still running after 25s with no node on PATH."
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+
+      - name: Uninstall cleanly
+        shell: pwsh
+        run: |
+          $root = Split-Path $env:APP_EXE
+          $uninstall = Get-ChildItem $root -Filter 'uninstall.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $uninstall) {
+            Write-Host "::warning::no uninstall.exe beside the app; a tester cannot remove it from Add/Remove Programs"
+            exit 0
+          }
+          Start-Process -WindowStyle Hidden -FilePath $uninstall.FullName -ArgumentList '/S' -Wait
+          Write-Host "uninstalled."
+
