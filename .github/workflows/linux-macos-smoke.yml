@@ -50,7 +50,9 @@ jobs:
             exit 1
           fi
           echo "AppImage still running after 25s."
-          kill "$APP_PID" 2>/dev/null || true
+          APP_EXIT=0
+          wait "$APP_PID" || APP_EXIT=$?
+          test "$APP_EXIT" -eq 124 || { echo "::error::the AppImage exited before its timeout ($APP_EXIT)"; exit 1; }
           echo "--- output ---"
           cat appimage.log || true
 
