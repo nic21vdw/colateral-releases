@@ -2,7 +2,7 @@ name: Windows 1.0.58 installer smoke
 on:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 env:
   RELEASES: nic21vdw/colateral-releases
 jobs:

@@ -6,7 +6,7 @@ on:
         required: true
         default: linux
 permissions:
-  contents: read
+  contents: write
 env:
   RELEASES: nic21vdw/colateral-releases
 jobs:
