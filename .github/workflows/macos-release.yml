@@ -1,0 +1,140 @@
+name: macOS 1.0.58 release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-v1.0.58
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    if: github.actor == 'nic21vdw'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: nic21vdw/CoLateral-AI
+          ref: v1.0.58
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Sync bridge and workspace assets
+        working-directory: apps/desktop
+        run: npm run sync-assets
+
+      - name: Add both macOS node-pty prebuilds for the universal bundle
+        working-directory: apps/bridge
+        run: |
+          VERSION=$(node -p "require('./node_modules/@lydell/node-pty/package.json').version")
+          npm install --no-save --force \
+            "@lydell/node-pty-darwin-arm64@$VERSION" \
+            "@lydell/node-pty-darwin-x64@$VERSION"
+          for ARCH in arm64 x64; do
+            test -d "node_modules/@lydell/node-pty-darwin-$ARCH" \
+              || { echo "missing darwin-$ARCH prebuild"; exit 1; }
+          done
+
+      - name: Configure Apple signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "Unsigned macOS build: APPLE_CERTIFICATE is not set. Gatekeeper will refuse the app until the user presses Open Anyway in System Settings." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            printf 'APPLE_CERTIFICATE<<__CERT__\n%s\n__CERT__\n' "$APPLE_CERTIFICATE"
+            printf 'APPLE_CERTIFICATE_PASSWORD<<__APPLE_ENV_CERTIFICATE_PASSWORD__\n%s\n__APPLE_ENV_CERTIFICATE_PASSWORD__\n' "$APPLE_CERTIFICATE_PASSWORD"
+            printf 'APPLE_SIGNING_IDENTITY<<__APPLE_ENV_SIGNING_IDENTITY__\n%s\n__APPLE_ENV_SIGNING_IDENTITY__\n' "$APPLE_SIGNING_IDENTITY"
+            printf 'APPLE_ID<<__APPLE_ENV_ID__\n%s\n__APPLE_ENV_ID__\n' "$APPLE_ID"
+            printf 'APPLE_PASSWORD<<__APPLE_ENV_PASSWORD__\n%s\n__APPLE_ENV_PASSWORD__\n' "$APPLE_PASSWORD"
+            printf 'APPLE_TEAM_ID<<__APPLE_ENV_TEAM_ID__\n%s\n__APPLE_ENV_TEAM_ID__\n' "$APPLE_TEAM_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Sign the bridge's native modules
+        working-directory: apps/bridge
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            exit 0
+          fi
+
+          KEYCHAIN="$RUNNER_TEMP/bridge-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/bridge-signing.p12"
+          security import "$RUNNER_TEMP/bridge-signing.p12" \
+            -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/bridge-signing.p12"
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+
+          BINARIES=$(find node_modules -type f \
+            \( -name '*.node' -o -name '*.dylib' -o -perm -u+x \) \
+            -exec sh -c 'file -b "$1" | grep -q "Mach-O"' _ {} \; -print)
+
+          if [ -z "$BINARIES" ]; then
+            echo "No Mach-O binaries under apps/bridge/node_modules." >&2
+            echo "Either the bridge stopped shipping native code, or this step is looking in the wrong place. Signing nothing here means notarisation fails twenty minutes from now instead." >&2
+            exit 1
+          fi
+
+          echo "$BINARIES" | while read -r BINARY; do
+            codesign --force --timestamp --options runtime \
+              --keychain "$KEYCHAIN" --sign "$APPLE_SIGNING_IDENTITY" "$BINARY"
+            codesign --verify --strict "$BINARY"
+          done
+
+          echo "Signed $(echo "$BINARIES" | wc -l | tr -d ' ') native binaries in the bridge." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build universal DMG
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node scripts/ensure-tauri-icon.mjs
+          npx next build
+          npx tauri build --target universal-apple-darwin \
+            --config '{"build":{"beforeBuildCommand":""},"bundle":{"active":true,"targets":["app","dmg"]}}'
+
+      - name: Report how the build was signed
+        if: env.APPLE_CERTIFICATE != ''
+        run: echo "Signed and notarised macOS build." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          repository: nic21vdw/colateral-releases
+          token: ${{ github.token }}
+          tag_name: v1.0.58
+          draft: true
+          fail_on_unmatched_files: true
+          files: |
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+
