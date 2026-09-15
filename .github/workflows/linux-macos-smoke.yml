@@ -1,0 +1,230 @@
+name: Linux and macOS 1.0.58 installer smoke
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        required: true
+        default: linux
+permissions:
+  contents: read
+env:
+  RELEASES: nic21vdw/colateral-releases
+jobs:
+  linux:
+    if: inputs.platforms == 'all' || contains(inputs.platforms, 'linux')
+    runs-on: ubuntu-22.04
+    steps:
+
+      - name: Install a desktop the way a tester has one
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 \
+            xvfb desktop-file-utils shared-mime-info
+
+      - name: Download the published Linux builds
+        run: |
+          gh release download "v1.0.58" --repo "$RELEASES" \
+            --pattern '*.AppImage' --pattern '*.deb' --dir dl
+          ls -la dl
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: chmod +x, as the download page instructs
+        run: |
+          cd dl
+          APPIMAGE=$(ls *.AppImage)
+          test ! -x "$APPIMAGE" || echo "note: already executable in the release asset"
+          chmod +x "$APPIMAGE"
+          echo "APPIMAGE=$PWD/$APPIMAGE" >> "$GITHUB_ENV"
+
+      - name: AppImage starts and stays up
+        run: |
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a timeout 40 "$APPIMAGE" \
+            > appimage.log 2>&1 &
+          APP_PID=$!
+          sleep 25
+          if ! kill -0 "$APP_PID" 2>/dev/null; then
+            echo "::error::the AppImage exited within 25 seconds of launch"
+            cat appimage.log
+            exit 1
+          fi
+          echo "AppImage still running after 25s."
+          kill "$APP_PID" 2>/dev/null || true
+          echo "--- output ---"
+          cat appimage.log || true
+
+      - name: The deb installs, and registers a desktop entry and an icon
+        run: |
+          sudo apt-get install -y ./dl/*.deb
+          DESKTOP=$(ls /usr/share/applications/ | grep -i colateral || true)
+          if [ -z "$DESKTOP" ]; then
+            echo "::error::the deb installed no .desktop entry, so the app will not appear in any launcher"
+            ls /usr/share/applications/
+            exit 1
+          fi
+          echo "desktop entry: $DESKTOP"
+          desktop-file-validate "/usr/share/applications/$DESKTOP" \
+            || echo "::warning::desktop-file-validate complained; the entry exists but is not strictly valid"
+          ICONS=$(find /usr/share/icons -iname '*colateral*' | head -5)
+          if [ -z "$ICONS" ]; then
+            echo "::error::the deb installed no icon, so the launcher entry will be blank"
+            exit 1
+          fi
+          echo "icons:"; echo "$ICONS"
+
+      - name: The installed binary starts too, with no node on PATH
+        run: |
+          BIN=$(command -v colateral-desktop || command -v CoLateral || true)
+          if [ -z "$BIN" ]; then
+            BIN=$(dpkg -L "$(dpkg -f dl/*.deb Package)" | grep '/usr/bin/' | head -1)
+          fi
+          echo "binary: $BIN"
+          test -n "$BIN" || { echo "::error::the deb installed no binary on PATH"; exit 1; }
+          env PATH=/usr/bin:/bin xvfb-run -a timeout 40 "$BIN" > deb.log 2>&1 &
+          APP_PID=$!
+          sleep 25
+          if ! kill -0 "$APP_PID" 2>/dev/null; then
+            echo "::error::the installed binary exited within 25 seconds with no node on PATH"
+            cat deb.log
+            exit 1
+          fi
+          echo "installed binary still running after 25s with no node on PATH."
+          kill "$APP_PID" 2>/dev/null || true
+          cat deb.log || true
+
+  macos:
+    if: inputs.platforms == 'all' || contains(inputs.platforms, 'macos')
+    runs-on: macos-14
+    steps:
+
+      - name: Download the published dmg
+        run: |
+          gh release download "v1.0.58" --repo "$RELEASES" \
+            --pattern '*.dmg' --dir dl
+          ls -la dl
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: The dmg mounts and holds an app bundle
+        run: |
+          DMG=$(ls dl/*.dmg)
+          hdiutil attach "$DMG" -nobrowse -mountpoint /Volumes/CoLateralSmoke
+          APP=$(ls -d /Volumes/CoLateralSmoke/*.app)
+          echo "APP_SRC=$APP" >> "$GITHUB_ENV"
+          echo "bundle: $APP"
+          ls "$APP/Contents"
+          test -f "$APP/Contents/Info.plist" || { echo "::error::no Info.plist"; exit 1; }
+
+      - name: The binary is genuinely universal
+        run: |
+          BIN=$(ls "$APP_SRC/Contents/MacOS/"* | head -1)
+          echo "binary: $BIN"
+          ARCHS=$(lipo -archs "$BIN")
+          echo "architectures: $ARCHS"
+          echo "$ARCHS" | grep -q x86_64 || { echo "::error::no x86_64 slice: Intel Macs cannot run this"; exit 1; }
+          echo "$ARCHS" | grep -q arm64 || { echo "::error::no arm64 slice: Apple Silicon cannot run this natively"; exit 1; }
+
+      - name: Both node-pty prebuilds shipped inside the bundle
+        run: |
+          PTY=$(find "$APP_SRC" -type d -name 'node-pty-darwin-*' | sort)
+          echo "$PTY"
+          echo "$PTY" | grep -q 'darwin-arm64' || { echo "::error::the bundle has no darwin-arm64 node-pty"; exit 1; }
+          echo "$PTY" | grep -q 'darwin-x64' || { echo "::error::the bundle has no darwin-x64 node-pty, so the terminal is dead on Intel"; exit 1; }
+
+      - name: What Gatekeeper actually says about this build
+        run: |
+          echo "--- codesign ---"
+          codesign -dv --verbose=2 "$APP_SRC" 2>&1 || true
+          echo "--- spctl assessment ---"
+          if spctl -a -vvv -t exec "$APP_SRC" 2>&1; then
+            echo "Gatekeeper accepts it. Expect source=Notarized Developer ID above."
+          else
+            echo "::error::Gatekeeper REJECTS this build. The download page tells testers the Mac app is signed and notarised and opens on a double-click, and it does not. Either notarisation did not attach or the signature is broken."
+            exit 1
+          fi
+
+      - name: Install to /Applications, quarantined as a download would be
+        run: |
+          sudo cp -R "$APP_SRC" /Applications/
+          APP=/Applications/$(basename "$APP_SRC")
+          echo "APP=$APP" >> "$GITHUB_ENV"
+          hdiutil detach /Volumes/CoLateralSmoke || true
+          sudo xattr -w com.apple.quarantine \
+            "0081;00000000;Safari;|ai.colateral.desktop" "$APP" || true
+          echo "quarantine attribute:"; xattr -l "$APP" || true
+          echo "--- spctl on the quarantined copy in /Applications ---"
+          spctl -a -vvv -t exec "$APP" 2>&1 || {
+            echo "::error::Gatekeeper rejects the quarantined copy. This is the exact state a tester's download is in."
+            exit 1
+          }
+
+      - name: The bundle carries the microphone usage string
+        run: |
+          plutil -p "$APP/Contents/Info.plist" | grep -q "NSMicrophoneUsageDescription" || {
+            echo "::error::NSMicrophoneUsageDescription is not in the shipped Info.plist. Hands-free voice will report a blocked microphone on every Mac, with no prompt and nothing in System Settings to allow. Check apps/desktop/src-tauri/Info.plist still exists under that exact name."
+            exit 1
+          }
+          plutil -p "$APP/Contents/Info.plist" | grep "NSMicrophoneUsageDescription"
+
+      - name: The hardened runtime keeps its exceptions to the ones named in entitlements.plist
+        run: |
+          ENT=$(codesign -d --entitlements :- --xml "$APP" 2>/dev/null \
+            | plutil -convert xml1 -o - - 2>/dev/null || codesign -d --entitlements :- "$APP" 2>/dev/null)
+          echo "$ENT"
+          for needed in allow-jit allow-unsigned-executable-memory; do
+            echo "$ENT" | grep -q "com.apple.security.cs.$needed" || {
+              echo "::error::com.apple.security.cs.$needed is missing. WKWebView compiles JavaScript at runtime and renders a blank window without it, with no error anywhere."
+              exit 1
+            }
+          done
+          echo "$ENT" | grep -q "com.apple.security.device.audio-input" || {
+            echo "::error::com.apple.security.device.audio-input is missing. The hardened runtime then denies the microphone with no prompt and no entry in System Settings, so hands-free voice reports a blocked mic that the user has no way to unblock."
+            exit 1
+          }
+          for banned in disable-library-validation allow-dyld-environment-variables; do
+            if echo "$ENT" | grep -q "com.apple.security.cs.$banned"; then
+              echo "::error::com.apple.security.cs.$banned is back. It was removed on purpose: it makes library injection and DYLD preloading into this process realistic, which is the cheapest route to skipping the licence check. If something genuinely needs it, say what in entitlements.plist and change this check deliberately."
+              exit 1
+            fi
+          done
+          echo "entitlements are the two JIT exceptions plus audio input, and nothing else."
+
+      - name: The app starts and stays up, with no node on PATH
+        run: |
+          BIN=$(ls "$APP/Contents/MacOS/"* | head -1)
+          echo "APP_BIN=$BIN" >> "$GITHUB_ENV"
+          env PATH=/usr/bin:/bin "$BIN" > mac.log 2>&1 &
+          APP_PID=$!
+          sleep 25
+          if ! kill -0 "$APP_PID" 2>/dev/null; then
+            echo "::error::the app exited within 25 seconds of launch"
+            cat mac.log
+            exit 1
+          fi
+          echo "app still running after 25s with no node on PATH."
+          kill "$APP_PID" 2>/dev/null || true
+          cat mac.log || true
+
+      - name: With node present, the app runs and the bridge daemon comes up
+        run: |
+          echo "node: $(which node) $(node -v)"
+          "$APP_BIN" > mac-node.log 2>&1 &
+          APP_PID=$!
+          sleep 30
+          if ! kill -0 "$APP_PID" 2>/dev/null; then
+            echo "::error::the app exited within 30 seconds when node was on PATH, and survived without it. That points at the bridge spawn path - most likely a native module the hardened runtime refused to load."
+            cat mac-node.log
+            exit 1
+          fi
+          echo "--- app log ---"
+          cat mac-node.log || true
+          echo "--- anything listening on the bridge port range ---"
+          lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -E ':87[3-4][0-9]' || \
+            echo "note: no bridge port bound. The app is up and this is not fatal - the daemon only starts once the canvas asks for an agent - but a Library not loaded error in the log above is."
+          if grep -qi "Library not loaded\|code signature\|not valid for use in process" mac-node.log; then
+            echo "::error::the app logged a code signing or library load failure. Removing an entitlement broke something real."
+            exit 1
+          fi
+          kill "$APP_PID" 2>/dev/null || true
+
