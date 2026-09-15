@@ -59,18 +59,20 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -z "$APPLE_CERTIFICATE" ]; then
-            echo "Unsigned macOS build: APPLE_CERTIFICATE is not set. Gatekeeper will refuse the app until the user presses Open Anyway in System Settings." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          {
-            printf 'APPLE_CERTIFICATE<<__CERT__\n%s\n__CERT__\n' "$APPLE_CERTIFICATE"
-            printf 'APPLE_CERTIFICATE_PASSWORD<<__APPLE_ENV_CERTIFICATE_PASSWORD__\n%s\n__APPLE_ENV_CERTIFICATE_PASSWORD__\n' "$APPLE_CERTIFICATE_PASSWORD"
-            printf 'APPLE_SIGNING_IDENTITY<<__APPLE_ENV_SIGNING_IDENTITY__\n%s\n__APPLE_ENV_SIGNING_IDENTITY__\n' "$APPLE_SIGNING_IDENTITY"
-            printf 'APPLE_ID<<__APPLE_ENV_ID__\n%s\n__APPLE_ENV_ID__\n' "$APPLE_ID"
-            printf 'APPLE_PASSWORD<<__APPLE_ENV_PASSWORD__\n%s\n__APPLE_ENV_PASSWORD__\n' "$APPLE_PASSWORD"
-            printf 'APPLE_TEAM_ID<<__APPLE_ENV_TEAM_ID__\n%s\n__APPLE_ENV_TEAM_ID__\n' "$APPLE_TEAM_ID"
-          } >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import base64
+          import os
+          names = ("APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              for name in names:
+                  value = os.environ[name].strip()
+                  if name == "APPLE_CERTIFICATE":
+                      value = "".join(value.split())
+                      base64.b64decode(value, validate=True)
+                  if not value or "\n" in value or "\r" in value:
+                      raise ValueError("Invalid signing input: " + name)
+                  output.write(name + "=" + value + "\n")
+          PY
 
       - name: Sign the bridge's native modules
         working-directory: apps/bridge
