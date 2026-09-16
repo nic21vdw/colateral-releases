@@ -1,4 +1,4 @@
-name: Linux and macOS 1.0.58 installer smoke
+name: Linux and macOS 1.0.59 installer smoke
 on:
   workflow_dispatch:
     inputs:
@@ -24,7 +24,7 @@ jobs:
 
       - name: Download the published Linux builds
         run: |
-          gh release download "v1.0.58" --repo "$RELEASES" \
+          gh release download "v1.0.59" --repo "$RELEASES" \
             --pattern '*.AppImage' --pattern '*.deb' --dir dl
           ls -la dl
         env:
@@ -102,7 +102,7 @@ jobs:
 
       - name: Download the published dmg
         run: |
-          gh release download "v1.0.58" --repo "$RELEASES" \
+          gh release download "v1.0.59" --repo "$RELEASES" \
             --pattern '*.dmg' --dir dl
           ls -la dl
         env:
