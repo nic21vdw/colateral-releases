@@ -122,6 +122,7 @@ jobs:
         run: |
           node scripts/ensure-tauri-icon.mjs
           npx next build
+          npm run test:parity
           npx tauri build --target universal-apple-darwin \
             --config '{"build":{"beforeBuildCommand":""},"bundle":{"active":true,"targets":["app","dmg"]}}'
 
