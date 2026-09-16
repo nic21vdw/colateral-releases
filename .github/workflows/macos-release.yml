@@ -13,7 +13,7 @@ concurrency:
 jobs:
   macos:
     if: github.actor == 'nic21vdw'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -125,7 +125,11 @@ jobs:
       - name: Check canvas in Chromium and WebKit
         working-directory: apps/desktop
         timeout-minutes: 8
-        run: npm run test:parity
+        run: |
+          node -e "require('node:http').createServer((req,res)=>{res.writeHead(req.method==='OPTIONS'?204:503,{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'*','Access-Control-Allow-Methods':'GET,POST,OPTIONS','Content-Type':'application/json'});res.end(JSON.stringify({error:'Bridge unavailable in the canvas fixture'}));}).listen(8737,'127.0.0.1')" &
+          FIXTURE_PID=$!
+          trap 'kill "$FIXTURE_PID" 2>/dev/null || true' EXIT
+          npm run test:parity
 
       - name: Build universal DMG
         timeout-minutes: 30
