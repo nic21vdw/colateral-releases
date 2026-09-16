@@ -1,4 +1,4 @@
-name: Windows 1.0.58 installer smoke
+name: Windows 1.0.59 installer smoke
 on:
   workflow_dispatch:
 permissions:
@@ -14,7 +14,7 @@ jobs:
       - name: Download the published installer
         shell: bash
         run: |
-          gh release download "v1.0.58" --repo "$RELEASES" \
+          gh release download "v1.0.59" --repo "$RELEASES" \
             --pattern '*-setup.exe' --dir dl
           ls -la dl
         env:
@@ -59,7 +59,7 @@ jobs:
       - name: The installed version is the version that was tagged
         shell: pwsh
         run: |
-          $expected = 'v1.0.58'.TrimStart('v')
+          $expected = 'v1.0.59'.TrimStart('v')
           if ($env:APP_VERSION -ne $expected) {
             Write-Host "::error::installed version $env:APP_VERSION does not match the tag $expected"
             exit 1
