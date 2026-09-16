@@ -1,4 +1,4 @@
-name: macOS 1.0.58 release
+name: macOS 1.0.59 release
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: macos-v1.0.58
+  group: macos-v1.0.59
   cancel-in-progress: false
 
 jobs:
@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: nic21vdw/CoLateral-AI
-          ref: v1.0.58
+          ref: 5fcaaab8df9f432102c4934973e4770a35a825a9
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
 
@@ -134,7 +134,7 @@ jobs:
         with:
           repository: nic21vdw/colateral-releases
           token: ${{ github.token }}
-          tag_name: v1.0.58
+          tag_name: v1.0.59
           draft: true
           fail_on_unmatched_files: true
           files: |
