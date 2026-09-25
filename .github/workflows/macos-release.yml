@@ -1,35 +1,75 @@
-name: macOS 1.0.59 release
+name: macOS release
+run-name: macOS ${{ inputs.tag }} ${{ inputs.source }}
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Source tag, for example v1.0.63
+        required: true
+      source:
+        description: Full commit SHA the tag names
+        required: true
 
 permissions:
   contents: write
 
 concurrency:
-  group: macos-v1.0.59
+  group: macos-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   macos:
     if: github.actor == 'nic21vdw'
     runs-on: macos-15
+    environment: mac-release
     timeout-minutes: 45
+    env:
+      TAG: ${{ inputs.tag }}
+      SOURCE: ${{ inputs.source }}
+      COLATERAL_BUILD_SHA: ${{ inputs.source }}
     steps:
+      - name: Check inputs
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3"; exit 1; }
+          [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]] || { echo "source must be a full commit SHA"; exit 1; }
+
       - uses: actions/checkout@v5
         with:
           repository: nic21vdw/CoLateral-AI
-          ref: 5fcaaab8df9f432102c4934973e4770a35a825a9
+          ref: ${{ inputs.tag }}
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
+
+      - name: Confirm the tag names the requested source
+        run: |
+          HEAD_SHA=$(git rev-parse HEAD)
+          [ "$HEAD_SHA" = "$SOURCE" ] || { echo "$TAG is $HEAD_SHA, not $SOURCE"; exit 1; }
+          VERSION=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          [ "v$VERSION" = "$TAG" ] || { echo "source version $VERSION does not match $TAG"; exit 1; }
 
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            apps/bridge/package-lock.json
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/desktop/src-tauri/target
+          key: macos-universal-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: macos-universal-
 
       - name: Install desktop dependencies
         working-directory: apps/desktop
@@ -66,7 +106,7 @@ jobs:
           names = ("APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID")
           with open(os.environ["GITHUB_ENV"], "a") as output:
               for name in names:
-                  value = os.environ[name].strip().lstrip("\ufeff").strip()
+                  value = os.environ[name].strip().lstrip("﻿").strip()
                   if name == "APPLE_CERTIFICATE":
                       value = "".join(value.split())
                       base64.b64decode(value, validate=True)
@@ -79,10 +119,6 @@ jobs:
       - name: Sign the bridge's native modules
         working-directory: apps/bridge
         run: |
-          if [ -z "$APPLE_CERTIFICATE" ]; then
-            exit 0
-          fi
-
           KEYCHAIN="$RUNNER_TEMP/bridge-signing.keychain-db"
           KEYCHAIN_PASSWORD=$(uuidgen)
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
@@ -102,8 +138,7 @@ jobs:
             -exec sh -c 'file -b "$1" | grep -q "Mach-O"' _ {} \; -print)
 
           if [ -z "$BINARIES" ]; then
-            echo "No Mach-O binaries under apps/bridge/node_modules." >&2
-            echo "Either the bridge stopped shipping native code, or this step is looking in the wrong place. Signing nothing here means notarisation fails twenty minutes from now instead." >&2
+            echo "No Mach-O binaries under apps/bridge/node_modules; notarisation would reject the bundle." >&2
             exit 1
           fi
 
@@ -112,8 +147,6 @@ jobs:
               --keychain "$KEYCHAIN" --sign "$APPLE_SIGNING_IDENTITY" "$BINARY"
             codesign --verify --strict "$BINARY"
           done
-
-          echo "Signed $(echo "$BINARIES" | wc -l | tr -d ' ') native binaries in the bridge." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build desktop frontend
         working-directory: apps/desktop
@@ -131,7 +164,7 @@ jobs:
           trap 'kill "$FIXTURE_PID" 2>/dev/null || true' EXIT
           npm run test:parity
 
-      - name: Build universal DMG
+      - name: Build, sign and notarise the universal DMG
         timeout-minutes: 30
         working-directory: apps/desktop
         env:
@@ -141,19 +174,21 @@ jobs:
           npx tauri build --target universal-apple-darwin \
             --config '{"build":{"beforeBuildCommand":""},"bundle":{"active":true,"targets":["app","dmg"]}}'
 
-      - name: Report how the build was signed
-        if: env.APPLE_CERTIFICATE != ''
-        run: echo "Signed and notarised macOS build." >> "$GITHUB_STEP_SUMMARY"
+      - name: Prove the app is signed and notarised
+        run: |
+          APP=$(ls -d apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app | head -1)
+          codesign --verify --deep --strict "$APP"
+          spctl -a -vv -t exec "$APP" 2>&1 | tee spctl.txt
+          grep -q "source=Notarized Developer ID" spctl.txt
 
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           repository: nic21vdw/colateral-releases
           token: ${{ github.token }}
-          tag_name: v1.0.59
+          tag_name: ${{ inputs.tag }}
           draft: true
           fail_on_unmatched_files: true
           files: |
             apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
             apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
-
