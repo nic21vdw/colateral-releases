@@ -1,19 +1,30 @@
-name: Linux and macOS 1.0.59 installer smoke
+name: Linux and macOS installer smoke
+run-name: Installer smoke ${{ inputs.tag }}
 on:
   workflow_dispatch:
     inputs:
+      tag:
+        description: Published stable release tag to test (for example v1.0.68)
+        type: string
+        required: true
       platforms:
         required: true
         default: linux
 permissions:
-  contents: write
+  contents: read
 env:
+  TAG: ${{ inputs.tag }}
   RELEASES: nic21vdw/colateral-releases
 jobs:
   linux:
     if: inputs.platforms == 'all' || contains(inputs.platforms, 'linux')
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
+      - name: Validate the requested release tag
+        shell: bash
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Expected a stable release tag such as v1.0.68"; exit 1; }
 
       - name: Install a desktop the way a tester has one
         run: |
@@ -24,7 +35,7 @@ jobs:
 
       - name: Download the published Linux builds
         run: |
-          gh release download "v1.0.59" --repo "$RELEASES" \
+          gh release download "$TAG" --repo "$RELEASES" \
             --pattern '*.AppImage' --pattern '*.deb' --dir dl
           ls -la dl
         env:
@@ -98,11 +109,16 @@ jobs:
   macos:
     if: inputs.platforms == 'all' || contains(inputs.platforms, 'macos')
     runs-on: macos-14
+    timeout-minutes: 15
     steps:
+      - name: Validate the requested release tag
+        shell: bash
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Expected a stable release tag such as v1.0.68"; exit 1; }
 
       - name: Download the published dmg
         run: |
-          gh release download "v1.0.59" --repo "$RELEASES" \
+          gh release download "$TAG" --repo "$RELEASES" \
             --pattern '*.dmg' --dir dl
           ls -la dl
         env:
