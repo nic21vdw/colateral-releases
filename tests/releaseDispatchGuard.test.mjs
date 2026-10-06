@@ -67,4 +67,7 @@ for (const env of [{RELEASE_TAG:'v1.2.3;echo injected'},{RELEASE_SOURCE:'main'},
   assert.equal(result.calls.length,0,'invalid inputs stop before network');
 }
 assert.equal((await run({current:{display_title:'unrelated'}})).exitCode,1);
+// A shrinking listing can skip a successful run across the page boundary.
+assert.equal((await run({pages:[{total_count:101,workflow_runs:pageOne},{total_count:100,workflow_runs:[]}]})).exitCode,1,'shrinking run history is not evidence of absence');
+assert.equal((await run({pages:[{total_count:101,workflow_runs:pageOne},{total_count:102,workflow_runs:[completed(101,`Desktop v9.1.0 ${sha}`),completed(102,`Desktop v9.1.1 ${sha}`)]}]})).exitCode,1,'growing run history must be reviewed before build');
 console.log(`releaseDispatchGuard: PASS (${guards.length} workflow copies; duplicate, pagination, retry, input and API-failure cases)`);

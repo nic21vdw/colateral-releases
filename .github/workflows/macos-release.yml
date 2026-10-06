@@ -81,11 +81,14 @@ jobs:
             }
             await checkAttempts(env.GITHUB_RUN_ID, attempt);
             const seen = new Set();
+          let historyCount = null;
             for (let page = 1; page <= 10; page++) {
               const data = await get(`workflows/${current.workflow_id}/runs?per_page=100&page=${page}`);
               // Bound the lookup; never treat truncated or shifting history as absence.
               if (!Number.isSafeInteger(data.total_count) || data.total_count < 0 || data.total_count > 1000
                   || !Array.isArray(data.workflow_runs)) throw new Error('Incomplete run history; review before dispatch.');
+              if (historyCount !== null && data.total_count !== historyCount) throw new Error('Run history changed during lookup; refusing to build.');
+              historyCount = data.total_count;
               for (const run of data.workflow_runs) {
                 if (!Number.isSafeInteger(run.id) || typeof run.display_title !== 'string'
                     || typeof run.status !== 'string' || seen.has(run.id)) throw new Error('Invalid or shifting run history.');
