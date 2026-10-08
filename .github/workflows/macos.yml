@@ -1,0 +1,350 @@
+# Maintained public-runner template. Install as .github/workflows/macos-release.yml
+# in nic21vdw/colateral-releases; it is not active in the private source repo.
+name: macOS release
+run-name: macOS ${{ inputs.tag }} ${{ inputs.source }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Source tag, for example v1.0.63
+        required: true
+      source:
+        description: Full commit SHA the tag names
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: macos-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    if: github.actor == 'nic21vdw'
+    runs-on: macos-15
+    environment: mac-release
+    timeout-minutes: 45
+    env:
+      TAG: ${{ inputs.tag }}
+      SOURCE: ${{ inputs.source }}
+      COLATERAL_BUILD_SHA: ${{ inputs.source }}
+    steps:
+      - name: Reject an already completed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SOURCE: ${{ inputs.source }}
+          RELEASE_PREFIX: macOS
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          // Same-tag concurrency serializes publishers. This read-only preflight rejects
+          // an already successful identity before checkout, compilation or publication.
+          const env = process.env;
+          const tag = env.RELEASE_TAG;
+          const source = env.RELEASE_SOURCE?.toLowerCase();
+          const prefix = env.RELEASE_PREFIX;
+          try {
+            if (!/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(tag || '') || !/^[a-f0-9]{40}$/.test(source || '')) {
+              throw new Error('Expected a stable version tag and full source SHA.');
+            }
+            if (!['Desktop', 'macOS'].includes(prefix) || !/^[\w.-]+\/[\w.-]+$/.test(env.GITHUB_REPOSITORY || '')
+                || !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID || '') || !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT || '')
+                || !env.GH_TOKEN) throw new Error('Missing or invalid dispatch context.');
+            const attempt = Number(env.GITHUB_RUN_ATTEMPT);
+            if (attempt > 20) throw new Error('Too many attempts to verify safely; review run history.');
+            const base = `https://api.github.com/repos/${env.GITHUB_REPOSITORY}/actions`;
+            async function get(path) {
+              const response = await fetch(`${base}/${path}`, {
+                headers: { Authorization: `Bearer ${env.GH_TOKEN}`, Accept: 'application/vnd.github+json' },
+                signal: AbortSignal.timeout(20000), redirect: 'error',
+              });
+              if (!response.ok) throw new Error(`Cannot verify completed runs (HTTP ${response.status}); refusing to build.`);
+              return response.json();
+            }
+            const title = `${prefix} ${tag} ${source}`.toLowerCase();
+            const current = await get(`runs/${env.GITHUB_RUN_ID}`);
+            if (!Number.isSafeInteger(current.workflow_id) || current.workflow_id <= 0
+                || current.event !== 'workflow_dispatch' || current.display_title?.toLowerCase() !== title) {
+              throw new Error('Run identity does not match the requested tag and source.');
+            }
+            const reject = id => { throw new Error(`Release ${tag} at ${source} already completed in run ${id}. Reuse its result; no build or publication was started.`); };
+            // A rerun keeps its run ID and hides the old conclusion in the run listing.
+            async function checkAttempts(id, count) {
+              if (!Number.isSafeInteger(count) || count < 1 || count > 20) throw new Error('Cannot verify previous attempts safely.');
+              for (let previous = 1; previous < count; previous++) {
+                const run = await get(`runs/${id}/attempts/${previous}`);
+                if (run.conclusion === 'success') reject(id);
+                if (run.status !== 'completed') throw new Error('Previous attempt is not verifiably complete.');
+              }
+            }
+            await checkAttempts(env.GITHUB_RUN_ID, attempt);
+            const seen = new Set();
+          let historyCount = null;
+            for (let page = 1; page <= 10; page++) {
+              const data = await get(`workflows/${current.workflow_id}/runs?per_page=100&page=${page}`);
+              // Bound the lookup; never treat truncated or shifting history as absence.
+              if (!Number.isSafeInteger(data.total_count) || data.total_count < 0 || data.total_count > 1000
+                  || !Array.isArray(data.workflow_runs)) throw new Error('Incomplete run history; review before dispatch.');
+              if (historyCount !== null && data.total_count !== historyCount) throw new Error('Run history changed during lookup; refusing to build.');
+              historyCount = data.total_count;
+              for (const run of data.workflow_runs) {
+                if (!Number.isSafeInteger(run.id) || typeof run.display_title !== 'string'
+                    || typeof run.status !== 'string' || seen.has(run.id)) throw new Error('Invalid or shifting run history.');
+                seen.add(run.id);
+                const sameTitle = run.display_title.toLowerCase() === title;
+                const legacyTagPush = run.event === 'push' && run.head_branch === tag && run.head_sha?.toLowerCase() === source;
+                if (sameTitle || legacyTagPush) {
+                  if (run.conclusion === 'success') reject(run.id);
+                  if (String(run.id) !== env.GITHUB_RUN_ID) await checkAttempts(run.id, run.run_attempt);
+                }
+              }
+              if (seen.size >= data.total_count) break;
+              if (!data.workflow_runs.length || page === 10) throw new Error('Incomplete run history; refusing to build.');
+            }
+            console.log('No completed release with this tag/source in retained workflow history. Existing source and publication gates still apply.');
+          } catch (error) {
+            console.error(`::error::${error.message}`);
+            process.exitCode = 1;
+          }
+          NODE
+
+      - name: Check inputs
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3"; exit 1; }
+          [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]] || { echo "source must be a full commit SHA"; exit 1; }
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: nic21vdw/CoLateral-AI
+          ref: ${{ inputs.tag }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Confirm the tag names the requested source
+        run: |
+          HEAD_SHA=$(git rev-parse HEAD)
+          [ "$HEAD_SHA" = "$SOURCE" ] || { echo "$TAG is $HEAD_SHA, not $SOURCE"; exit 1; }
+          VERSION=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          [ "v$VERSION" = "$TAG" ] || { echo "source version $VERSION does not match $TAG"; exit 1; }
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            apps/bridge/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/desktop/src-tauri/target
+          key: macos-universal-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: macos-universal-
+
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Sync bridge and workspace assets
+        working-directory: apps/desktop
+        run: npm run sync-assets
+
+      - name: Add both macOS node-pty prebuilds for the universal bundle
+        working-directory: apps/bridge
+        run: |
+          VERSION=$(node -p "require('./node_modules/@lydell/node-pty/package.json').version")
+          npm install --no-save --force \
+            "@lydell/node-pty-darwin-arm64@$VERSION" \
+            "@lydell/node-pty-darwin-x64@$VERSION"
+          for ARCH in arm64 x64; do
+            test -d "node_modules/@lydell/node-pty-darwin-$ARCH" \
+              || { echo "missing darwin-$ARCH prebuild"; exit 1; }
+          done
+
+      - name: Configure Apple signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          names = ("APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              for name in names:
+                  value = os.environ[name].strip().lstrip("﻿").strip()
+                  if name == "APPLE_CERTIFICATE":
+                      value = "".join(value.split())
+                      base64.b64decode(value, validate=True)
+                  if not value or "\n" in value or "\r" in value:
+                      raise ValueError("Invalid signing input: " + name)
+                  print("::add-mask::" + value)
+                  output.write(name + "=" + value + "\n")
+          PY
+
+      - name: Sign the bridge's native modules
+        working-directory: apps/bridge
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/bridge-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/bridge-signing.p12"
+          security import "$RUNNER_TEMP/bridge-signing.p12" \
+            -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/bridge-signing.p12"
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+
+          BINARIES=$(find node_modules -type f \
+            \( -name '*.node' -o -name '*.dylib' -o -perm -u+x \) \
+            -exec sh -c 'file -b "$1" | grep -q "Mach-O"' _ {} \; -print)
+
+          if [ -z "$BINARIES" ]; then
+            echo "No Mach-O binaries under apps/bridge/node_modules; notarisation would reject the bundle." >&2
+            exit 1
+          fi
+
+          echo "$BINARIES" | while read -r BINARY; do
+            codesign --force --timestamp --options runtime \
+              --keychain "$KEYCHAIN" --sign "$APPLE_SIGNING_IDENTITY" "$BINARY"
+            codesign --verify --strict "$BINARY"
+          done
+
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        timeout-minutes: 8
+        run: |
+          node scripts/ensure-tauri-icon.mjs
+          npx next build
+
+      - name: Check canvas in Chromium and WebKit
+        id: parity
+        working-directory: apps/desktop
+        timeout-minutes: 8
+        run: |
+          node -e "require('node:http').createServer((req,res)=>{res.writeHead(req.method==='OPTIONS'?204:503,{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'*','Access-Control-Allow-Methods':'GET,POST,OPTIONS','Content-Type':'application/json'});res.end(JSON.stringify({error:'Bridge unavailable in the canvas fixture'}));}).listen(8737,'127.0.0.1')" &
+          FIXTURE_PID=$!
+          trap 'kill "$FIXTURE_PID" 2>/dev/null || true' EXIT
+          npm run test:parity
+
+      - name: Check legacy Mac APIs and notebook pinch in both engines
+        working-directory: .
+        timeout-minutes: 8
+        env:
+          COLATERAL_PARITY_PLAYWRIGHT: ${{ github.workspace }}/apps/desktop/node_modules/playwright/index.mjs
+        run: node tests/macPrReviewBrowser.test.mjs
+
+      - name: Test Mac license stores and native identity
+        timeout-minutes: 20
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib licence:: -- --test-threads=1
+
+      - name: Build, sign and notarise the universal DMG
+        timeout-minutes: 30
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npx tauri build --target universal-apple-darwin \
+            --config '{"build":{"beforeBuildCommand":""},"bundle":{"active":true,"targets":["app","dmg"]}}'
+
+      - name: Validate universal Mac bundle and bridge resources
+        timeout-minutes: 4
+        run: node scripts/check-macos-native-bundle.mjs apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/CoLateral.app "${TAG#v}"
+
+      - name: Prove the app is signed and notarised
+        run: |
+          APP=$(ls -d apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app | head -1)
+          codesign --verify --deep --strict "$APP"
+          spctl -a -vv -t exec "$APP" 2>&1 | tee spctl.txt
+          grep -q "source=Notarized Developer ID" spctl.txt
+
+      - name: Record frozen source and all macOS payload hashes
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          import { copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+          import { basename, join } from 'node:path';
+          const source = process.env.SOURCE;
+          const version = process.env.TAG.slice(1);
+          if (!/^[a-f0-9]{40}$/.test(source || '') || !/^\d+\.\d+\.\d+$/.test(version)
+              || execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() !== source) {
+            throw new Error('Mac payload source does not match the frozen source.');
+          }
+          const config = JSON.parse(readFileSync('apps/desktop/src-tauri/tauri.conf.json', 'utf8'));
+          const desktop = JSON.parse(readFileSync('apps/desktop/package.json', 'utf8'));
+          const cargo = readFileSync('apps/desktop/src-tauri/Cargo.toml', 'utf8').split(/^\[package\]\s*$/m)[1]?.split(/^\[/m)[0];
+          const rustVersion = cargo?.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          if (config.version !== version || desktop.version !== version || rustVersion !== version) {
+            throw new Error('Mac receipt version differs from the checked-out desktop, Tauri or Rust version.');
+          }
+          const root = 'apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle';
+          const select = (folder, test) => {
+            const files = readdirSync(join(root, folder)).filter(test);
+            if (files.length !== 1) throw new Error(`Expected one ${folder} payload, found ${files.length}.`);
+            return join(root, folder, files[0]);
+          };
+          const dmg = select('dmg', name => name.endsWith('.dmg'));
+          const archive = select('macos', name => name.endsWith('.app.tar.gz'));
+          const signature = select('macos', name => name.endsWith('.app.tar.gz.sig'));
+          if (!basename(dmg).endsWith(`_${version}_universal.dmg`) || signature !== `${archive}.sig`) {
+            throw new Error('Mac installer version or archive/signature pairing differs.');
+          }
+          mkdirSync('macos-payloads', { recursive: true });
+          const files = Object.fromEntries([dmg, archive, signature].map(file => {
+            copyFileSync(file, join('macos-payloads', basename(file)));
+            return [basename(file), createHash('sha256').update(readFileSync(file)).digest('hex')];
+          }));
+          writeFileSync('macos-payloads/build-receipt-macos.json', `${JSON.stringify({ schema: 1, platform: 'macos', source, version, files }, null, 2)}\n`);
+          NODE
+
+      - name: Upload immutable Mac assets without changing the release channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          const tag = process.env.TAG;
+          const repo = 'nic21vdw/colateral-releases';
+          const gh = args => execFileSync('gh', args, { encoding: 'utf8', stdio: 'pipe', timeout: 180000 });
+          const release = JSON.parse(gh(['release', 'view', tag, '--repo', repo, '--json', 'isDraft,isPrerelease,assets']));
+          if (!release.isDraft && !release.isPrerelease) throw new Error('Stable assets are immutable; build a new candidate.');
+          const hash = path => createHash('sha256').update(readFileSync(path)).digest('hex');
+          const directory = mkdtempSync(join(tmpdir(), 'macos-existing-assets-'));
+          // Validate every existing asset before uploading any missing assets.
+          const missing = [];
+          for (const name of readdirSync('macos-payloads')) {
+            const file = join('macos-payloads', name);
+            if (release.assets.some(asset => asset.name === name)) {
+              gh(['release', 'download', tag, '--repo', repo, '--pattern', name, '--dir', directory]);
+              if (hash(file) !== hash(join(directory, name))) throw new Error(`Immutable asset ${name} differs; cut a new version.`);
+            } else missing.push(file);
+          }
+          for (const file of missing) gh(['release', 'upload', tag, '--repo', repo, file]);
+          NODE
