@@ -255,6 +255,10 @@ jobs:
           COLATERAL_PARITY_PLAYWRIGHT: ${{ github.workspace }}/apps/desktop/node_modules/playwright/index.mjs
         run: node tests/macPrReviewBrowser.test.mjs
 
+      - name: Test Mac license stores and native identity
+        timeout-minutes: 20
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib licence:: -- --test-threads=1
+
       - name: Build, sign and notarise the universal DMG
         timeout-minutes: 30
         working-directory: apps/desktop
@@ -264,6 +268,10 @@ jobs:
         run: |
           npx tauri build --target universal-apple-darwin \
             --config '{"build":{"beforeBuildCommand":""},"bundle":{"active":true,"targets":["app","dmg"]}}'
+
+      - name: Validate universal Mac bundle and bridge resources
+        timeout-minutes: 4
+        run: node scripts/check-macos-native-bundle.mjs apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/CoLateral.app "${TAG#v}"
 
       - name: Prove the app is signed and notarised
         run: |
