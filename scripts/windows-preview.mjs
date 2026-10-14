@@ -15,18 +15,33 @@ export const MARKER = `Frozen source: ${SOURCE}\nFrozen tree: ${TREE}\nCloud reb
 const root = resolve('candidate'), stage = resolve('preview-assets');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const json = file => JSON.parse(readFileSync(file, 'utf8'));
-const git = args => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: root, encoding: 'utf8', timeout: 15000 }).trim();
+const git = args => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: root, encoding: 'utf8', timeout: 15000 }).trimEnd();
 const write = (name, value) => writeFileSync(join(stage, name), JSON.stringify(value, null, 2) + '\n');
 const runUrl = () => `https://github.com/${REPO}/actions/runs/${process.env.GITHUB_RUN_ID}`;
 
 export function assertCandidate(facts) {
-  if (facts.source !== SOURCE || facts.tree !== TREE || facts.dirty || facts.version !== VERSION || facts.cargoVersion !== VERSION || facts.key !== KEY) throw new Error('Frozen source/tree/version/key or clean tracked state differs.');
+  const mismatches = [['source', SOURCE], ['tree', TREE], ['version', VERSION], ['cargoVersion', VERSION], ['key', KEY]]
+    .filter(([name, expected]) => facts[name] !== expected).map(([name]) => name);
+  if (facts.dirty) mismatches.push('tracked state');
+  if (mismatches.length) {
+    // Report field names and Git paths/status only. Never dump private source,
+    // configuration contents, keys, or environment values into public CI logs.
+    const changes = facts.dirty && facts.trackedStatus
+      ? ' Tracked changes (paths/status only): ' + JSON.stringify(facts.trackedStatus.split(/\r?\n/).slice(0, 25))
+      : '';
+    throw new Error('Frozen candidate verification failed: ' + mismatches.join(', ') + '.' + changes);
+  }
 }
 function candidate() {
   const config = json(join(root, 'apps/desktop/src-tauri/tauri.conf.json'));
   const cargo = readFileSync(join(root, 'apps/desktop/src-tauri/Cargo.toml'), 'utf8');
   const section = cargo.split('[package]')[1]?.split(/^\[/m)[0] ?? '';
-  assertCandidate({ source: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']), dirty: Boolean(git(['status', '--porcelain=v1', '--untracked-files=no'])), version: config.version, cargoVersion: section.match(/^version\s*=\s*"([^"]+)"/m)?.[1], key: config.plugins?.updater?.pubkey });
+  const trackedStatus = git(['status', '--porcelain=v1', '--untracked-files=no']);
+  assertCandidate({ source: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']), dirty: Boolean(trackedStatus), trackedStatus, version: config.version, cargoVersion: section.match(/^version\s*=\s*"([^"]+)"/m)?.[1], key: config.plugins?.updater?.pubkey });
+}
+async function checkpoint() {
+  candidate();
+  console.log('Frozen source/tree/version/key and clean tracked state confirmed.');
 }
 export function assertExisting(release) {
   if (!release) return;
@@ -128,8 +143,9 @@ async function publish() {
   console.log(JSON.stringify({ release: release.html_url, installer: `https://github.com/${REPO}/releases/download/v${VERSION}/${INSTALLER}`, source: SOURCE, tree: TREE, sha256: files[0].sha256, qualification: 'manual-preview', stablePromotion: false, publiclyVerified: true }));
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const actions = { preflight, admission, stage: stageBuild, publish };
+  const actions = { preflight, admission, checkpoint, stage: stageBuild, publish };
   const action = actions[process.argv[2]];
-  if (!action) throw new Error('Choose preflight, admission, stage or publish.');
+  if (!action) throw new Error('Choose preflight, admission, checkpoint, stage or publish.');
   await action();
 }
+

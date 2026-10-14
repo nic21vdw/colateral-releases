@@ -71,10 +71,16 @@ jobs:
           node scripts/sync-app-assets.mjs
           npx next build
 
+      - name: Verify frozen tracked source after frontend build
+        run: node tooling/scripts/windows-preview.mjs checkpoint
+
       - name: Check desktop canvas parity
         working-directory: candidate/apps/desktop
         timeout-minutes: 8
         run: npm run test:parity
+
+      - name: Verify frozen tracked source after parity and before native build
+        run: node tooling/scripts/windows-preview.mjs checkpoint
 
       - name: Build updater-signed Windows NSIS preview
         working-directory: candidate/apps/desktop
@@ -83,6 +89,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --bundles nsis --config '{"build":{"beforeBuildCommand":""}}' -- --locked
+
+      - name: Verify frozen tracked source after native build
+        run: node tooling/scripts/windows-preview.mjs checkpoint
 
       - name: Verify actual installer signature and record new build hashes
         timeout-minutes: 5
@@ -93,3 +102,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node tooling/scripts/windows-preview.mjs publish
+
