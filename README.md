@@ -22,7 +22,12 @@ its existing owner and skips every later step. The exact current workflow attemp
 is identified only when no retained version exists. Rechecks before frontend,
 native compilation and publication stop a concurrent owner race at the next
 checkpoint. A local owner must set the existing repository's `WINDOWS_PREVIEW_HOLD`
-variable to `1` before unpublished work; this check cannot observe an unregistered
+variable to `1` before unpublished work. The workflow captures it at job start;
+changes affect future jobs, not the active attempt's later checkpoints. Setting
+the hold alone never authorizes overlapping work. Before starting, a local owner
+must obtain completion or authorized cancellation and explicit release of any
+active cloud owner for that version. Confirm cancellation/completion rather than
+assuming a request stopped the process. This check cannot observe an unregistered
 local process. Clearing a hold is the release owner's decision.
 
 If another owner publishes after the last recheck, the existing executor's

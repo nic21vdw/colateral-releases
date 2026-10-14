@@ -31,7 +31,7 @@ export async function inspectPreviewOwnership({ fetchImpl = fetch, env = process
     || current.head_sha !== env.GITHUB_SHA || current.event !== 'workflow_dispatch' || current.status !== 'in_progress'
     || current.path !== '.github/workflows/windows-preview.yml') throw new Error('This execution is not the current assigned preview owner; stop before build.');
   return { buildAllowed: true, owner: 'current-workflow-run', reason: 'Current manual workflow owns this attempt; no retained release exists.',
-    limitation: 'Unpublished local work requires the release-owner hold. This read-only check cannot observe an unregistered local process.' };
+    limitation: 'The hold is a job-start snapshot for future jobs. Before unpublished local work, obtain completion or authorized cancellation and explicit release of the active cloud owner; setting hold alone never authorizes overlap. This read-only check cannot observe an unregistered local process.' };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
