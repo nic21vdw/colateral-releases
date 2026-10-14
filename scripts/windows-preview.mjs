@@ -11,11 +11,13 @@ export const REPO = 'nic21vdw/colateral-releases';
 export const KEY = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0MjlFNTgyMjA0MDgzQQpSV1E2Q0FRaVdKNUNCMDc4c2k5Z3RMSFd3VmFjQndOR2JGVTBRd3ExajhSeDBRN1VFNkYram1hZwo=';
 export const INSTALLER = `CoLateral_${VERSION}_x64-setup.exe`;
 export const SIGNATURE = INSTALLER + '.sig';
+export const CARGO_MANIFEST = 'apps/desktop/src-tauri/Cargo.toml';
 export const MARKER = `Frozen source: ${SOURCE}\nFrozen tree: ${TREE}\nCloud rebuild; original NicPC installer was not used.`;
 const root = resolve('candidate'), stage = resolve('preview-assets');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const json = file => JSON.parse(readFileSync(file, 'utf8'));
-const git = args => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: root, encoding: 'utf8', timeout: 15000 }).trimEnd();
+const gitBytes = args => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: root, timeout: 15000 });
+const git = args => gitBytes(args).toString('utf8').trimEnd();
 const write = (name, value) => writeFileSync(join(stage, name), JSON.stringify(value, null, 2) + '\n');
 const runUrl = () => `https://github.com/${REPO}/actions/runs/${process.env.GITHUB_RUN_ID}`;
 
@@ -32,16 +34,88 @@ export function assertCandidate(facts) {
     throw new Error('Frozen candidate verification failed: ' + mismatches.join(', ') + '.' + changes);
   }
 }
-function candidate() {
+export function compareCargoManifests(original, built) {
+  // Python 3.12/tomllib is already installed on the standard Windows image.
+  // Isolated standard-library imports and stdin keep source out of commands/logs.
+  let input;
+  try {
+    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+    const decode = value => {
+      if (typeof value !== 'string') return decoder.decode(value);
+      if (Buffer.from(value, 'utf8').toString('utf8') !== value) throw new Error();
+      return value;
+    };
+    input = JSON.stringify({ original: decode(original), built: decode(built) });
+  } catch {
+    return { equivalent: false, parser: 'python.tomllib', python: 'not-run-invalid-utf8' };
+  }
+  const script = `import datetime, json, math, platform, sys, tomllib
+def same(a, b):
+    if type(a) is not type(b): return False
+    if isinstance(a, dict): return a.keys() == b.keys() and all(same(a[k], b[k]) for k in a)
+    if isinstance(a, list): return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
+    if isinstance(a, float):
+        if math.isnan(a) or math.isnan(b): return math.isnan(a) and math.isnan(b) and math.copysign(1, a) == math.copysign(1, b)
+        return a == b and (a != 0 or math.copysign(1, a) == math.copysign(1, b))
+    if isinstance(a, (datetime.datetime, datetime.date, datetime.time)): return a.isoformat() == b.isoformat()
+    return a == b
+try:
+    values = json.load(sys.stdin)
+    equivalent = same(tomllib.loads(values['original']), tomllib.loads(values['built']))
+except Exception:
+    equivalent = False
+print(json.dumps({'equivalent': equivalent, 'parser': 'python.tomllib', 'python': platform.python_version()}))
+`;
+  try {
+    const result = JSON.parse(execFileSync('python', ['-I', '-S', '-c', script], {
+      input, encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'],
+    }));
+    if (typeof result.equivalent !== 'boolean' || result.parser !== 'python.tomllib' || typeof result.python !== 'string') throw new Error();
+    return result;
+  } catch {
+    throw new Error('Isolated standard-library TOML comparison is unavailable; tracked manifest changes remain forbidden.');
+  }
+}
+export function assertAdmission(receipt, run, original) {
+  if (!receipt || receipt.source !== SOURCE || receipt.tree !== TREE || receipt.version !== VERSION || receipt.verdict !== 'passed' || receipt.run !== run
+    || receipt.cargoManifest?.path !== CARGO_MANIFEST || receipt.cargoManifest?.frozenSha256 !== hash(original)
+    || !/^[a-f0-9]{64}$/.test(receipt.cargoManifest?.admittedSha256 ?? '') || receipt.cargoManifest?.trackedState !== 'clean') throw new Error('This run has no source-bound clean essential gate and manifest baseline receipt.');
+}
+export function manifestModesUnchanged(rawDiff) {
+  const lines = rawDiff.split(/\r?\n/);
+  if (lines.length !== 1) return false;
+  const fields = lines[0].split('\t');
+  return fields.length === 2 && fields[1] === CARGO_MANIFEST && /^:100644 100644 [a-f0-9]{40} 0{40} M$/.test(fields[0]);
+}
+export function assertBuildCandidate(facts, { original, built, admission, run }) {
+  // All frozen identity/trust checks remain mandatory. Only this exact unstaged
+  // path may differ, after clean admission, and only with full typed TOML equality.
+  assertCandidate({ ...facts, dirty: false });
+  if (Boolean(facts.dirty) !== Boolean(facts.trackedStatus)) throw new Error('Tracked candidate state is inconsistent.');
+  if (facts.dirty && facts.trackedStatus !== ' M ' + CARGO_MANIFEST) assertCandidate(facts);
+  if (facts.dirty && facts.manifestModesUnchanged !== true) throw new Error('Cargo.toml file mode or type changed, or its unchanged regular-file mode could not be verified.');
+  assertAdmission(admission, run, original);
+  const comparison = compareCargoManifests(original, built);
+  if (!comparison.equivalent) throw new Error('Frozen Cargo.toml has malformed TOML or semantic changes; publication refused.');
+  return { path: CARGO_MANIFEST, frozenSha256: hash(original), admittedSha256: admission.cargoManifest.admittedSha256,
+    builtSha256: hash(built), semanticEquality: true, parser: comparison.parser, python: comparison.python,
+    trackedState: facts.dirty ? 'unstaged-representation-only' : 'clean' };
+}
+function candidate({ allowCargoSerialization = false } = {}) {
   const config = json(join(root, 'apps/desktop/src-tauri/tauri.conf.json'));
   const cargo = readFileSync(join(root, 'apps/desktop/src-tauri/Cargo.toml'), 'utf8');
   const section = cargo.split('[package]')[1]?.split(/^\[/m)[0] ?? '';
   const trackedStatus = git(['status', '--porcelain=v1', '--untracked-files=no']);
-  assertCandidate({ source: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']), dirty: Boolean(trackedStatus), trackedStatus, version: config.version, cargoVersion: section.match(/^version\s*=\s*"([^"]+)"/m)?.[1], key: config.plugins?.updater?.pubkey });
+  const modesUnchanged = allowCargoSerialization && trackedStatus === ' M ' + CARGO_MANIFEST
+    ? manifestModesUnchanged(git(['diff', '--raw', '--no-abbrev', '--no-ext-diff', '--no-renames', '--', CARGO_MANIFEST])) : false;
+  const facts = { source: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']), dirty: Boolean(trackedStatus), trackedStatus, manifestModesUnchanged: modesUnchanged, version: config.version, cargoVersion: section.match(/^version\s*=\s*"([^"]+)"/m)?.[1], key: config.plugins?.updater?.pubkey };
+  if (!allowCargoSerialization) { assertCandidate(facts); return; }
+  return assertBuildCandidate(facts, { original: gitBytes(['show', SOURCE + ':' + CARGO_MANIFEST]), built: readFileSync(join(root, CARGO_MANIFEST)), admission: json(join(stage, 'cloud-admission.json')), run: runUrl() });
 }
 async function checkpoint() {
-  candidate();
-  console.log('Frozen source/tree/version/key and clean tracked state confirmed.');
+  if (process.argv[3] && process.argv[3] !== 'after-native') throw new Error('Unknown candidate checkpoint phase.');
+  const manifest = candidate({ allowCargoSerialization: process.argv[3] === 'after-native' });
+  console.log(manifest ? 'Frozen candidate verified; full typed Cargo.toml semantics unchanged: ' + JSON.stringify(manifest) : 'Frozen source/tree/version/key and clean tracked state confirmed.');
 }
 export function assertExisting(release) {
   if (!release) return;
@@ -89,24 +163,24 @@ async function admission() {
   execFileSync(process.execPath, [runner, ...tests], { cwd: root, stdio: 'inherit', timeout: 890000, env });
   candidate();
   mkdirSync(stage, { recursive: true });
-  write('cloud-admission.json', { schema: 1, source: SOURCE, tree: TREE, version: VERSION, tests, verdict: 'passed', qualification: 'build-only', gameplayAcceptance: 'deferred-to-user', run: runUrl(), at: new Date().toISOString() });
+  const cargoManifest = { path: CARGO_MANIFEST, frozenSha256: hash(gitBytes(['show', SOURCE + ':' + CARGO_MANIFEST])), admittedSha256: hash(readFileSync(join(root, CARGO_MANIFEST))), trackedState: 'clean' };
+  write('cloud-admission.json', { schema: 1, source: SOURCE, tree: TREE, version: VERSION, tests, verdict: 'passed', cargoManifest, qualification: 'build-only', gameplayAcceptance: 'deferred-to-user', run: runUrl(), at: new Date().toISOString() });
 }
 async function stageBuild() {
-  candidate();
-  const admission = json(join(stage, 'cloud-admission.json'));
-  if (admission.source !== SOURCE || admission.tree !== TREE || admission.verdict !== 'passed' || admission.run !== runUrl()) throw new Error('This run has no source-bound essential gate receipt.');
+  const cargoManifest = candidate({ allowCargoSerialization: true });
   const bundle = join(root, 'apps/desktop/src-tauri/target/release/bundle/nsis');
   for (const name of [INSTALLER, SIGNATURE]) copyFileSync(join(bundle, name), join(stage, name));
   const signature = readFileSync(join(stage, SIGNATURE), 'utf8').trim();
   write('latest.json', { version: VERSION, notes: 'Windows manual preview cloud rebuild. Gameplay/native qualification unverified. Stable and paid delivery unchanged.', pub_date: new Date().toISOString(), manual_preview: { source: SOURCE, tree: TREE, qualification: 'build-only', platform: 'windows-x86_64' }, platforms: { 'windows-x86_64': { signature, url: `https://github.com/${REPO}/releases/download/v${VERSION}/${INSTALLER}` } } });
   execFileSync(process.execPath, [join(root, 'scripts/check-updater-manifest.mjs'), '--manifest', join(stage, 'latest.json'), '--dir', stage, '--platforms', 'windows-x86_64', '--source', SOURCE], { cwd: root, stdio: 'inherit', timeout: 180000 });
   const files = Object.fromEntries([INSTALLER, SIGNATURE, 'latest.json', 'cloud-admission.json'].map(name => [name, hash(readFileSync(join(stage, name)))]));
-  write('cloud-build-receipt.json', { schema: 1, source: SOURCE, tree: TREE, version: VERSION, kind: 'cloud-rebuild', files, updaterKeyId: '3a080422589e4207', updaterSignature: 'verified', authenticode: 'unverified-optional', desktopParity: 'passed', qualification: 'build-only', gameplayAcceptance: 'deferred-to-user', run: runUrl(), toolingSource: process.env.GITHUB_SHA, builtAt: new Date().toISOString() });
+  write('cloud-build-receipt.json', { schema: 1, source: SOURCE, tree: TREE, version: VERSION, kind: 'cloud-rebuild', files, cargoManifest, updaterKeyId: '3a080422589e4207', updaterSignature: 'verified', authenticode: 'unverified-optional', desktopParity: 'passed', qualification: 'build-only', gameplayAcceptance: 'deferred-to-user', run: runUrl(), toolingSource: process.env.GITHUB_SHA, builtAt: new Date().toISOString() });
 }
 async function publish() {
-  candidate();
+  const cargoManifest = candidate({ allowCargoSerialization: true });
   const receipt = json(join(stage, 'cloud-build-receipt.json'));
   if (receipt.source !== SOURCE || receipt.tree !== TREE || receipt.version !== VERSION || receipt.run !== runUrl() || receipt.updaterSignature !== 'verified') throw new Error('Actual source-bound cloud build receipt is missing.');
+  if (JSON.stringify(receipt.cargoManifest) !== JSON.stringify(cargoManifest)) throw new Error('Verified manifest representation or semantic-equality receipt changed after staging.');
   for (const [name, digest] of Object.entries(receipt.files)) if (hash(readFileSync(join(stage, name))) !== digest) throw new Error('Verified artifact changed: ' + name);
   const names = [INSTALLER, SIGNATURE, 'latest.json', 'cloud-admission.json', 'cloud-build-receipt.json'];
   const files = names.map(name => { const bytes = readFileSync(join(stage, name)); return { name, bytes, size: bytes.length, sha256: hash(bytes) }; });
