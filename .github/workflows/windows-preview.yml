@@ -91,7 +91,7 @@ jobs:
         run: npx tauri build --bundles nsis --config '{"build":{"beforeBuildCommand":""}}' -- --locked
 
       - name: Verify frozen tracked source after native build
-        run: node tooling/scripts/windows-preview.mjs checkpoint
+        run: node tooling/scripts/windows-preview.mjs checkpoint after-native
 
       - name: Verify actual installer signature and record new build hashes
         timeout-minutes: 5
