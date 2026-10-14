@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, copyFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, copyFileSync, writeFileSync, lstatSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -81,11 +81,20 @@ export function assertAdmission(receipt, run, original) {
     || receipt.cargoManifest?.path !== CARGO_MANIFEST || receipt.cargoManifest?.frozenSha256 !== hash(original)
     || !/^[a-f0-9]{64}$/.test(receipt.cargoManifest?.admittedSha256 ?? '') || receipt.cargoManifest?.trackedState !== 'clean') throw new Error('This run has no source-bound clean essential gate and manifest baseline receipt.');
 }
-export function manifestModesUnchanged(rawDiff) {
+export function manifestModesUnchanged(rawDiff, { frozenEntry, indexEntry, regularFile, executable, normalizedBlob } = {}) {
+  // A CRLF checkout rewritten to LF can remain porcelain-dirty while Git's
+  // normalized raw diff is empty. Prove modes independently before that case.
+  const frozen = (frozenEntry ?? '').split('\t');
+  const index = (indexEntry ?? '').split('\t');
+  const frozenMetadata = /^100644 blob ([a-f0-9]{40})$/.exec(frozen[0]);
+  const indexMetadata = /^100644 ([a-f0-9]{40}) 0$/.exec(index[0]);
+  if (frozen.length !== 2 || index.length !== 2 || frozen[1] !== CARGO_MANIFEST || index[1] !== CARGO_MANIFEST
+    || !frozenMetadata || !indexMetadata || frozenMetadata[1] !== indexMetadata[1] || regularFile !== true || executable !== false) return false;
+  if (rawDiff === '') return normalizedBlob === frozenMetadata[1];
   const lines = rawDiff.split(/\r?\n/);
   if (lines.length !== 1) return false;
   const fields = lines[0].split('\t');
-  return fields.length === 2 && fields[1] === CARGO_MANIFEST && /^:100644 100644 [a-f0-9]{40} 0{40} M$/.test(fields[0]);
+  return fields.length === 2 && fields[1] === CARGO_MANIFEST && fields[0] === ':100644 100644 ' + frozenMetadata[1] + ' ' + '0'.repeat(40) + ' M';
 }
 export function assertBuildCandidate(facts, { original, built, admission, run }) {
   // All frozen identity/trust checks remain mandatory. Only this exact unstaged
@@ -106,8 +115,15 @@ function candidate({ allowCargoSerialization = false } = {}) {
   const cargo = readFileSync(join(root, 'apps/desktop/src-tauri/Cargo.toml'), 'utf8');
   const section = cargo.split('[package]')[1]?.split(/^\[/m)[0] ?? '';
   const trackedStatus = git(['status', '--porcelain=v1', '--untracked-files=no']);
-  const modesUnchanged = allowCargoSerialization && trackedStatus === ' M ' + CARGO_MANIFEST
-    ? manifestModesUnchanged(git(['diff', '--raw', '--no-abbrev', '--no-ext-diff', '--no-renames', '--', CARGO_MANIFEST])) : false;
+  let modesUnchanged = false;
+  if (allowCargoSerialization && trackedStatus === ' M ' + CARGO_MANIFEST) {
+    const stat = lstatSync(join(root, CARGO_MANIFEST));
+    modesUnchanged = manifestModesUnchanged(git(['diff', '--raw', '--no-abbrev', '--no-ext-diff', '--no-renames', '--', CARGO_MANIFEST]), {
+      frozenEntry: git(['ls-tree', SOURCE, '--', CARGO_MANIFEST]), indexEntry: git(['ls-files', '--stage', '--', CARGO_MANIFEST]),
+      regularFile: stat.isFile(), executable: process.platform !== 'win32' && Boolean(stat.mode & 0o111),
+      normalizedBlob: git(['hash-object', '--path=' + CARGO_MANIFEST, CARGO_MANIFEST]),
+    });
+  }
   const facts = { source: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']), dirty: Boolean(trackedStatus), trackedStatus, manifestModesUnchanged: modesUnchanged, version: config.version, cargoVersion: section.match(/^version\s*=\s*"([^"]+)"/m)?.[1], key: config.plugins?.updater?.pubkey };
   if (!allowCargoSerialization) { assertCandidate(facts); return; }
   return assertBuildCandidate(facts, { original: gitBytes(['show', SOURCE + ':' + CARGO_MANIFEST]), built: readFileSync(join(root, CARGO_MANIFEST)), admission: json(join(stage, 'cloud-admission.json')), run: runUrl() });
