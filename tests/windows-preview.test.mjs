@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, lstatSync, chmodSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
 import { test } from 'node:test';
 import { assertCandidate, assertBuildCandidate, compareCargoManifests, manifestModesUnchanged, assertExisting, assetMatches, requestUrl, assertPublicRepository, CARGO_MANIFEST, REPO, SOURCE, TREE, VERSION, KEY, MARKER } from '../scripts/windows-preview.mjs';
 
@@ -38,12 +41,75 @@ test('manifest proof requires the source-bound clean admission baseline from thi
 });
 test('representation-only acceptance rejects executable, symlink, type and unverified mode changes', () => {
   const raw = ':100644 100644 ' + 'a'.repeat(40) + ' ' + '0'.repeat(40) + ' M\t' + CARGO_MANIFEST;
-  assert.equal(manifestModesUnchanged(raw), true);
+  const evidence = { frozenEntry: '100644 blob ' + 'a'.repeat(40) + '\t' + CARGO_MANIFEST, indexEntry: '100644 ' + 'a'.repeat(40) + ' 0\t' + CARGO_MANIFEST, regularFile: true, executable: false, normalizedBlob: 'a'.repeat(40) };
+  assert.equal(manifestModesUnchanged(raw, evidence), true);
+  assert.equal(manifestModesUnchanged('', evidence), true);
+  assert.equal(manifestModesUnchanged(raw), false);
   for (const changed of [raw.replace(':100644 100644', ':100644 100755'), raw.replace(':100644 100644', ':100644 120000'), raw.replace(':100644 100644', ':120000 120000'), raw.replace(':100644 100644', ':100644 000000'), raw.replace(CARGO_MANIFEST, 'other-file'), raw + '\tother-file', raw + '\n' + raw, '']) {
-    assert.equal(manifestModesUnchanged(changed), false);
+    if (changed) assert.equal(manifestModesUnchanged(changed, evidence), false);
+  }
+  for (const changed of [{ frozenEntry: evidence.frozenEntry.replace('100644', '100755') }, { indexEntry: evidence.indexEntry.replace('100644', '120000') }, { indexEntry: evidence.indexEntry.replace(' 0\t', ' 1\t') }, { indexEntry: evidence.indexEntry.replace('a'.repeat(40), 'b'.repeat(40)) }, { regularFile: false }, { executable: true }, { normalizedBlob: 'b'.repeat(40) }]) {
+    assert.equal(manifestModesUnchanged('', { ...evidence, ...changed }), false);
   }
   for (const manifestModesUnchanged of [false, undefined, 'true']) {
     assert.throws(() => assertBuildCandidate({ ...buildFacts, manifestModesUnchanged }, buildProof), /file mode or type changed/);
+  }
+});
+test('Windows-like autocrlf checkout and LF rewrite retain dirty status with empty raw diff and are proven safely', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cargo-autocrlf-proof-'));
+  const file = join(root, CARGO_MANIFEST);
+  const gitBytes = args => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
+  const git = args => gitBytes(args).toString('utf8').trimEnd();
+  const modeProof = () => {
+    const stat = lstatSync(file);
+    return manifestModesUnchanged(git(['diff', '--raw', '--no-abbrev', '--no-ext-diff', '--no-renames', '--', CARGO_MANIFEST]), {
+      frozenEntry: git(['ls-tree', 'HEAD', '--', CARGO_MANIFEST]), indexEntry: git(['ls-files', '--stage', '--', CARGO_MANIFEST]),
+      regularFile: stat.isFile(), executable: process.platform !== 'win32' && Boolean(stat.mode & 0o111),
+      normalizedBlob: git(['hash-object', '--path=' + CARGO_MANIFEST, CARGO_MANIFEST]),
+    });
+  };
+  try {
+    git(['init', '-q']);
+    git(['config', 'core.autocrlf', 'true']);
+    git(['config', 'core.filemode', 'false']);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, originalCargo);
+    git(['add', CARGO_MANIFEST]);
+    git(['-c', 'user.name=Test fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'Newline fixture']);
+    rmSync(file);
+    git(['checkout', '--', CARGO_MANIFEST]);
+    const admitted = readFileSync(file);
+    assert.ok(admitted.includes(Buffer.from('\r\n')), 'Fixture must use a real CRLF checkout');
+    const fixtureAdmission = { ...admission, cargoManifest: { ...admission.cargoManifest, admittedSha256: digest(admitted) } };
+    writeFileSync(file, admitted.toString('utf8').replace(/\r\n/g, '\n'));
+    const trackedStatus = git(['status', '--porcelain=v1', '--untracked-files=no']);
+    assert.equal(trackedStatus, ' M ' + CARGO_MANIFEST);
+    assert.equal(git(['diff', '--raw', '--no-abbrev', '--no-ext-diff', '--no-renames', '--', CARGO_MANIFEST]), '');
+    assert.equal(modeProof(), true);
+    const facts = { ...buildFacts, trackedStatus, manifestModesUnchanged: modeProof() };
+    assert.throws(() => assertCandidate(facts), /tracked state/);
+    const proof = assertBuildCandidate(facts, { original: gitBytes(['show', 'HEAD:' + CARGO_MANIFEST]), built: readFileSync(file), admission: fixtureAdmission, run });
+    assert.equal(proof.semanticEquality, true);
+    assert.equal(proof.builtSha256, digest(originalCargo));
+    // Actual formatting changes still use the nonempty raw-diff branch.
+    writeFileSync(file, rewrittenCargo.replace(/\r\n/g, '\n'));
+    assert.notEqual(git(['diff', '--raw', '--no-abbrev', '--no-ext-diff', '--no-renames', '--', CARGO_MANIFEST]), '');
+    assert.equal(modeProof(), true);
+    assert.doesNotThrow(() => assertBuildCandidate({ ...facts, manifestModesUnchanged: modeProof() }, { original: originalCargo, built: readFileSync(file), admission: fixtureAdmission, run }));
+    writeFileSync(file, originalCargo.replace('version = "2"', 'version = "3"'));
+    assert.throws(() => assertBuildCandidate({ ...facts, manifestModesUnchanged: modeProof() }, { original: originalCargo, built: readFileSync(file), admission: fixtureAdmission, run }), /semantic changes/);
+    if (process.platform !== 'win32') {
+      // core.filemode=false must not conceal an actual executable-bit change.
+      writeFileSync(file, originalCargo);
+      chmodSync(file, 0o755);
+      assert.equal(modeProof(), false);
+      chmodSync(file, 0o644);
+    }
+    git(['add', CARGO_MANIFEST]);
+    git(['update-index', '--chmod=+x', CARGO_MANIFEST]);
+    assert.equal(modeProof(), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 test('typed TOML proof rejects key, dependency, array-order and scalar-value changes', () => {
