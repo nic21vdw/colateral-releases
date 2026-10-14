@@ -170,7 +170,7 @@ test('every tracked modification still fails and reports only escaped paths/stat
   assert.throws(() => assertCandidate({ ...frozen, dirty: true }), /tracked state/);
 });
 test('diagnostic checkpoints bracket build mutations without changing the frozen source or runner', () => {
-  const workflow = readFileSync(new URL('../.github/workflows/windows-preview.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../.github/workflows/windows-preview.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   const phases = [
     'Build frozen frontend and bridge assets',
     'Verify frozen tracked source after frontend build',

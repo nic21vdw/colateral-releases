@@ -23,13 +23,35 @@ jobs:
         shell: bash
     env:
       COLATERAL_BUILD_SHA: 71c50bb5feb7b5dbc5b621c2e8153693d6fc8807
+      PREVIEW_AUTHENTICODE: optional
+      PREVIEW_UPDATER_SIGNATURE: required
+      PREVIEW_RELEASE_HOLD: ${{ vars.WINDOWS_PREVIEW_HOLD }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           path: tooling
           persist-credentials: false
 
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24.19.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: 3.12.10
+
+      - name: Check release tooling regressions and explicit signing policy before build
+        timeout-minutes: 3
+        run: node tooling/scripts/release-tooling-preflight.mjs
+
+      - name: Reconcile retained release and identify the current owner before building
+        id: ownership
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node tooling/scripts/windows-preview-ownership.mjs initial
+
       - name: Check existing credential presence and publication state
+        if: steps.ownership.outputs.build_allowed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_DEPLOY_KEY: ${{ secrets.SOURCE_DEPLOY_KEY }}
@@ -37,6 +59,7 @@ jobs:
         run: node tooling/scripts/windows-preview.mjs preflight
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        if: steps.ownership.outputs.build_allowed == 'true'
         with:
           repository: nic21vdw/CoLateral-AI
           ref: 71c50bb5feb7b5dbc5b621c2e8153693d6fc8807
@@ -44,15 +67,13 @@ jobs:
           persist-credentials: false
           path: candidate
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
-        with:
-          node-version: 24
-
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        if: steps.ownership.outputs.build_allowed == 'true'
         with:
           toolchain: stable
 
       - name: Install frozen dependency locks
+        if: steps.ownership.outputs.build_allowed == 'true'
         timeout-minutes: 10
         run: |
           npm --prefix candidate ci --no-audit --no-fund
@@ -60,10 +81,18 @@ jobs:
           npm --prefix candidate/apps/bridge ci --no-audit --no-fund
 
       - name: Verify exact source and essential integrity gates
+        if: steps.ownership.outputs.build_allowed == 'true'
         timeout-minutes: 15
         run: node tooling/scripts/windows-preview.mjs admission
 
+      - name: Recheck ownership before frontend build
+        if: steps.ownership.outputs.build_allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node tooling/scripts/windows-preview-ownership.mjs before-frontend
+
       - name: Build frozen frontend and bridge assets
+        if: steps.ownership.outputs.build_allowed == 'true'
         working-directory: candidate/apps/desktop
         timeout-minutes: 10
         run: |
@@ -72,17 +101,27 @@ jobs:
           npx next build
 
       - name: Verify frozen tracked source after frontend build
+        if: steps.ownership.outputs.build_allowed == 'true'
         run: node tooling/scripts/windows-preview.mjs checkpoint
 
       - name: Check desktop canvas parity
+        if: steps.ownership.outputs.build_allowed == 'true'
         working-directory: candidate/apps/desktop
         timeout-minutes: 8
         run: npm run test:parity
 
       - name: Verify frozen tracked source after parity and before native build
+        if: steps.ownership.outputs.build_allowed == 'true'
         run: node tooling/scripts/windows-preview.mjs checkpoint
 
+      - name: Recheck ownership before native build
+        if: steps.ownership.outputs.build_allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node tooling/scripts/windows-preview-ownership.mjs before-native
+
       - name: Build updater-signed Windows NSIS preview
+        if: steps.ownership.outputs.build_allowed == 'true'
         working-directory: candidate/apps/desktop
         timeout-minutes: 35
         env:
@@ -92,12 +131,21 @@ jobs:
 
       - name: Verify frozen tracked source after native build
         run: node tooling/scripts/windows-preview.mjs checkpoint after-native
+        if: steps.ownership.outputs.build_allowed == 'true'
 
       - name: Verify actual installer signature and record new build hashes
+        if: steps.ownership.outputs.build_allowed == 'true'
         timeout-minutes: 5
         run: node tooling/scripts/windows-preview.mjs stage
 
+      - name: Recheck ownership before publication
+        if: steps.ownership.outputs.build_allowed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node tooling/scripts/windows-preview-ownership.mjs before-publication
+
       - name: Retain verified assets and publish manual prerelease
+        if: steps.ownership.outputs.build_allowed == 'true'
         timeout-minutes: 10
         env:
           GH_TOKEN: ${{ github.token }}
