@@ -31,9 +31,10 @@ export function runToolingRegressions({ spawn = spawnSync, env = process.env } =
   if (result.error || result.signal || result.status !== 0 || !complete) {
     const reason = result.error?.code === 'ETIMEDOUT' ? 'deadline exceeded' : result.signal ? 'test process interrupted' : 'test failure or missing prerequisite';
     const failedTests = [...new Set([...String(result.stdout || '').matchAll(/^not ok \d+ - (.+)$/gm)].map(match => match[1]))].slice(0, 15);
+    const assertionCodes = [...new Set([...String(result.stdout || '').matchAll(/^\s+code: '([A-Z_]+)'$/gm)].map(match => match[1]))].slice(0, 10);
     // Do not replay raw child output: a future test could print source, paths,
     // environment values or parser input. Keep the public failure actionable.
-    return { ok: false, phase: 'release-tooling-regressions', reason, failedTests,
+    return { ok: false, phase: 'release-tooling-regressions', reason, failedTests, assertionCodes,
       nextAction: 'Run node scripts/release-tooling-preflight.mjs in the tooling checkout with Git and Python 3.12 available. Repair the named regression or prerequisite, review it, and retry this gate before any build.' };
   }
   return { ok: true, phase: 'release-tooling-regressions', completed, tests: REGRESSION_TESTS, ...signing,

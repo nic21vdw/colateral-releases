@@ -47,6 +47,9 @@ Cargo manifest, unchanged Git mode/index and normalized blob, and full typed TOM
 equality. Staged changes, other tracked paths, changed dependencies/scalar types,
 invalid UTF-8/TOML, changed source or changed updater trust remain failures. No
 source edit, normalization repair or broad dirty-tree waiver is performed.
+Workflow-text assertions separately normalize LF/CRLF transport and rerun the
+actual checkpoint fixture with CRLF input. They still require the same checkpoint
+and stage order; they do not weaken the manifest or source-integrity checks.
 
 ## Signing and delivery evidence
 

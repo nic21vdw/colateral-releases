@@ -1,9 +1,28 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { assertPreviewSigningPolicy, runToolingRegressions, REGRESSION_TESTS } from '../scripts/release-tooling-preflight.mjs';
 
 const workflow = name => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+
+test('the actual checkpoint assertion passes with CRLF checkout text without dropping its required checkpoint', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'workflow-crlf-contract-'));
+  try {
+    const preload = join(dir, 'crlf.mjs');
+    writeFileSync(preload, String.raw`import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module'; const read=fs.readFileSync; fs.readFileSync=function(file,...rest){const value=read.call(this,file,...rest);if(String(file).replaceAll('\\','/').endsWith('/.github/workflows/windows-preview.yml')&&typeof value==='string'){const crlf=value.replace(/\r?\n/g,'\r\n');if(!crlf.includes('\r\n'))throw Error('CRLF fixture was not produced');return crlf;}return value;};syncBuiltinESMExports();`);
+    // A nested runner must not inherit the parent's private IPC test context.
+    const { NODE_TEST_CONTEXT, ...childEnv } = process.env;
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, '--test', '--test-reporter=tap',
+      '--test-name-pattern=diagnostic checkpoints bracket build mutations', fileURLToPath(new URL('./windows-preview.test.mjs', import.meta.url))],
+    { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true, env: childEnv });
+    assert.equal(result.status, 0, 'The actual checkpoint fixture must accept CRLF transport. Run that fixture to inspect its assertion.');
+    assert.match(result.stdout, /^# pass 1$/m, 'The checkpoint assertion must actually execute; an empty pattern match is not a pass.');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('real Git newline and typed TOML fixtures execute automatically before private checkout, secrets and compilation', () => {
   const text = workflow('windows-preview.yml');
