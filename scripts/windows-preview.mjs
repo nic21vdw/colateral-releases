@@ -35,9 +35,15 @@ export function assertExisting(release) {
 export function assetMatches(asset, expected) {
   return asset.name === expected.name && asset.size === expected.size && asset.digest === 'sha256:' + expected.sha256 && asset.state === 'uploaded';
 }
+export function requestUrl(path) {
+  return path.startsWith('https://uploads.github.com/') ? path : `https://api.github.com/repos/${REPO}${path ? '/' + path : ''}`;
+}
+export function assertPublicRepository(repo) {
+  if (!repo || repo.private !== false || repo.full_name !== REPO) throw new Error('Public repository/free standard runner cost boundary is not satisfied.');
+}
 async function request(path, { method = 'GET', body, bytes, contentType } = {}) {
   if (!process.env.GH_TOKEN) throw new Error('Existing GitHub execution token is unavailable.');
-  const url = path.startsWith('https://uploads.github.com/') ? path : `https://api.github.com/repos/${REPO}/${path}`;
+  const url = requestUrl(path);
   const response = await fetch(url, { method, headers: { authorization: `Bearer ${process.env.GH_TOKEN}`, accept: 'application/vnd.github+json', 'content-type': contentType ?? 'application/json' }, body: bytes ?? (body ? JSON.stringify(body) : undefined), redirect: 'error', signal: AbortSignal.timeout(bytes ? 300000 : 20000) });
   if (response.status === 404 && method === 'GET') return null;
   if (!response.ok) throw new Error(`GitHub ${method} failed: HTTP ${response.status}`);
@@ -48,7 +54,7 @@ const currentRelease = () => request(`releases/tags/v${VERSION}`);
 async function preflight() {
   if (process.env.GITHUB_REPOSITORY !== REPO || process.env.GITHUB_ACTOR !== 'nic21vdw' || process.env.RUNNER_OS !== 'Windows' || process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch') throw new Error('Only the owner manual dispatch on a public standard Windows runner is supported.');
   const repo = await request('');
-  if (repo.private || repo.full_name !== REPO) throw new Error('Public repository/free standard runner cost boundary is not satisfied.');
+  assertPublicRepository(repo);
   for (const name of ['SOURCE_DEPLOY_KEY', 'TAURI_SIGNING_PRIVATE_KEY']) if (!process.env[name]?.trim()) throw new Error('Existing environment credential is unavailable: ' + name + '. Stop; do not create keys or grants.');
   const existing = await currentRelease();
   assertExisting(existing);
