@@ -1,0 +1,95 @@
+name: Frozen Windows preview
+run-name: Windows preview 1.0.73 source71
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: windows-preview-v1.0.73
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    if: github.actor == 'nic21vdw' && github.repository == 'nic21vdw/colateral-releases'
+    runs-on: windows-latest
+    environment: mac-release
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      COLATERAL_BUILD_SHA: 71c50bb5feb7b5dbc5b621c2e8153693d6fc8807
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: tooling
+          persist-credentials: false
+
+      - name: Check existing credential presence and publication state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_DEPLOY_KEY: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: node tooling/scripts/windows-preview.mjs preflight
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: nic21vdw/CoLateral-AI
+          ref: 71c50bb5feb7b5dbc5b621c2e8153693d6fc8807
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: candidate
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+
+      - name: Install frozen dependency locks
+        timeout-minutes: 10
+        run: |
+          npm --prefix candidate ci --no-audit --no-fund
+          npm --prefix candidate/apps/desktop ci --no-audit --no-fund
+          npm --prefix candidate/apps/bridge ci --no-audit --no-fund
+
+      - name: Verify exact source and essential integrity gates
+        timeout-minutes: 15
+        run: node tooling/scripts/windows-preview.mjs admission
+
+      - name: Build frozen frontend and bridge assets
+        working-directory: candidate/apps/desktop
+        timeout-minutes: 10
+        run: |
+          node scripts/ensure-tauri-icon.mjs
+          node scripts/sync-app-assets.mjs
+          npx next build
+
+      - name: Check desktop canvas parity
+        working-directory: candidate/apps/desktop
+        timeout-minutes: 8
+        run: npm run test:parity
+
+      - name: Build updater-signed Windows NSIS preview
+        working-directory: candidate/apps/desktop
+        timeout-minutes: 35
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --bundles nsis --config '{"build":{"beforeBuildCommand":""}}' -- --locked
+
+      - name: Verify actual installer signature and record new build hashes
+        timeout-minutes: 5
+        run: node tooling/scripts/windows-preview.mjs stage
+
+      - name: Retain verified assets and publish manual prerelease
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node tooling/scripts/windows-preview.mjs publish
