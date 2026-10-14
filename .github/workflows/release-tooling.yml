@@ -1,0 +1,36 @@
+name: Release tooling regressions
+
+on:
+  pull_request:
+    paths: ['scripts/**', 'tests/**', '.github/workflows/**']
+  push:
+    branches: [main]
+    paths: ['scripts/**', 'tests/**', '.github/workflows/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-tooling-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  regressions:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24.19.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.10
+      - name: Check actual Git newline behavior, typed TOML and release trust gates
+        env:
+          PREVIEW_AUTHENTICODE: optional
+          PREVIEW_UPDATER_SIGNATURE: required
+        run: node scripts/release-tooling-preflight.mjs
