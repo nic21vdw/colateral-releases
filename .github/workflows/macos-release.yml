@@ -238,7 +238,6 @@ jobs:
 
       - name: Check canvas in Chromium and WebKit
         id: parity
-        continue-on-error: true
         working-directory: apps/desktop
         timeout-minutes: 8
         run: |
@@ -248,8 +247,8 @@ jobs:
           npm run test:parity
 
       - name: Report the Mac canvas check
-        if: steps.parity.outcome != 'success'
-        run: echo "::warning title=Mac canvas parity::The Chromium/WebKit canvas check failed on macOS. The release host already ran it for these bytes; read the step log before promoting."
+        if: failure() && steps.parity.outcome == 'failure'
+        run: echo "::error title=Mac canvas parity::The Chromium/WebKit canvas check failed on macOS. Packaging and upload are blocked; repair this check before publishing the Mac release."
 
       - name: Build, sign and notarise the universal DMG
         timeout-minutes: 30
