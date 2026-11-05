@@ -243,6 +243,14 @@ jobs:
         working-directory: apps/desktop
         timeout-minutes: 8
         run: |
+          # The macos-15 image ships with Reduce Transparency on, and Chromium
+          # reports it as prefers-reduced-transparency: reduce. The canvas then
+          # paints its glass surfaces opaque, as designed, and this check is
+          # written for the default glass surface. Turn the setting off and
+          # refuse to run the check if it did not take.
+          defaults write com.apple.universalaccess reduceTransparency -bool false
+          test "$(defaults read com.apple.universalaccess reduceTransparency)" = "0" \
+            || { echo "::error title=Mac canvas parity::Reduce Transparency is still on; the glass check would measure the opaque fallback."; exit 1; }
           node -e "require('node:http').createServer((req,res)=>{res.writeHead(req.method==='OPTIONS'?204:503,{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'*','Access-Control-Allow-Methods':'GET,POST,OPTIONS','Content-Type':'application/json'});res.end(JSON.stringify({error:'Bridge unavailable in the canvas fixture'}));}).listen(8737,'127.0.0.1')" &
           FIXTURE_PID=$!
           trap 'kill "$FIXTURE_PID" 2>/dev/null || true' EXIT
@@ -251,6 +259,197 @@ jobs:
       - name: Report the Mac canvas check
         if: failure() && steps.parity.outcome == 'failure'
         run: echo "::error title=Mac canvas parity::The Chromium/WebKit canvas check failed on macOS. Packaging and upload are blocked; repair this check before publishing the Mac release."
+
+      - name: Check the reduced-transparency fallback
+        # Accessibility coverage for the setting the step above turns off. With
+        # macOS Reduce Transparency on, the glass dock must paint opaque with no
+        # blur; with it off, the glass gradient. Each engine's reported
+        # preference is recorded beside the result. Chromium must follow the OS
+        # setting; an engine that does not is reported as unsupported, never
+        # counted as a pass. Chromium also runs both values through emulation.
+        working-directory: apps/desktop
+        timeout-minutes: 8
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+          import { readFile, stat } from 'node:fs/promises';
+          import { createServer } from 'node:http';
+          import { createRequire } from 'node:module';
+          import { extname, join, resolve, sep } from 'node:path';
+
+          const app = process.cwd();
+          const root = join(app, 'out');
+          const artifacts = resolve(app, '../../.test-cache/desktop-parity');
+          const { chromium, webkit } = createRequire(join(app, 'package.json'))('playwright');
+          const engines = { chromium, webkit };
+          const onMac = process.platform === 'darwin';
+          const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.wasm': 'application/wasm' };
+
+          const readSetting = () => {
+            try {
+              return execFileSync('defaults', ['read', 'com.apple.universalaccess', 'reduceTransparency'], { encoding: 'utf8' }).trim();
+            } catch {
+              return 'unset';
+            }
+          };
+          const writeSetting = on => {
+            execFileSync('defaults', ['write', 'com.apple.universalaccess', 'reduceTransparency', '-bool', on ? 'true' : 'false']);
+            assert.equal(readSetting(), on ? '1' : '0', `Reduce Transparency did not switch ${on ? 'on' : 'off'}`);
+          };
+
+          const server = createServer(async (req, res) => {
+            try {
+              let file = resolve(root, '.' + decodeURIComponent(new URL(req.url, 'http://localhost').pathname));
+              if (!file.startsWith(root + sep) && file !== root) throw new Error('path');
+              if ((await stat(file)).isDirectory()) file = join(file, 'index.html');
+              res.setHeader('Content-Type', types[extname(file)] || 'application/octet-stream');
+              res.end(await readFile(file));
+            } catch {
+              res.writeHead(404).end('Not found');
+            }
+          });
+          await new Promise(done => server.listen(0, '127.0.0.1', done));
+          const origin = `http://127.0.0.1:${server.address().port}`;
+          setTimeout(() => {
+            console.error('::error title=Mac reduced transparency::The check exceeded five minutes.');
+            process.exit(1);
+          }, 300000).unref();
+
+          async function measure(browser, emulate) {
+            const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
+            await page.route(/^http:\/\/127\.0\.0\.1:87[34]\d\//, route => route.fulfill({
+              status: 503, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' },
+              contentType: 'application/json', body: JSON.stringify({ error: 'Bridge unavailable in the canvas fixture' }),
+            }));
+            try {
+              if (emulate) {
+                const cdp = await page.context().newCDPSession(page);
+                await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-transparency', value: emulate }] });
+              }
+              await page.goto(origin, { waitUntil: 'domcontentloaded' });
+              await page.locator('.launch-action-primary').click();
+              const host = page.locator('iframe[data-colateral-host="desktop"]');
+              await host.waitFor();
+              const frame = await (await host.elementHandle()).contentFrame();
+              await frame.locator('html[data-canvas-state="ready"]').waitFor({ timeout: 20000 });
+              await frame.locator('.cv-dock').waitFor();
+              const themes = [];
+              for (const theme of ['light', 'dark', 'nord']) {
+                themes.push(await frame.evaluate(async theme => {
+                  if (!document.getElementById('rt-static')) {
+                    const style = document.createElement('style');
+                    style.id = 'rt-static';
+                    style.textContent = '*,*::before,*::after{transition:none!important;animation:none!important}';
+                    document.head.appendChild(style);
+                  }
+                  for (const node of [document.documentElement, document.body]) {
+                    node.dataset.theme = theme;
+                    node.dataset.surface = 'glass';
+                    node.classList.toggle('light', theme === 'light');
+                    node.style.setProperty('--cl-glass-level', '60');
+                  }
+                  await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+                  const style = getComputedStyle(document.querySelector('.cv-dock'));
+                  const alpha = (style.backgroundColor.match(/rgba?\(([^)]+)\)/)?.[1].split(/[\s,/]+/).filter(Boolean)[3]) ?? '1';
+                  return {
+                    theme,
+                    backgroundImage: style.backgroundImage,
+                    backgroundColor: style.backgroundColor,
+                    alpha: Number(alpha),
+                    backdrop: style.backdropFilter || style.webkitBackdropFilter || 'none',
+                  };
+                }, theme));
+              }
+              const reports = await frame.evaluate(() => matchMedia('(prefers-reduced-transparency: reduce)').matches);
+              const supported = await frame.evaluate(() => matchMedia('(prefers-reduced-transparency)').media !== 'not all'
+                && (matchMedia('(prefers-reduced-transparency: reduce)').matches || matchMedia('(prefers-reduced-transparency: no-preference)').matches));
+              return { reports, supported, themes };
+            } finally {
+              await page.close();
+            }
+          }
+
+          function judge(label, reading, expectReduce) {
+            const failures = [];
+            for (const t of reading.themes) {
+              const where = `${label} ${t.theme}`;
+              if (expectReduce) {
+                if (t.backgroundImage !== 'none') failures.push(`${where}: reduced transparency still paints a gradient (${t.backgroundImage.slice(0, 60)})`);
+                if (t.alpha !== 1) failures.push(`${where}: reduced transparency background is not opaque (${t.backgroundColor})`);
+                if (t.backdrop !== 'none') failures.push(`${where}: reduced transparency still blurs (${t.backdrop})`);
+              } else if (!/gradient\(/.test(t.backgroundImage)) {
+                failures.push(`${where}: normal mode lost the glass gradient (${t.backgroundImage})`);
+              }
+            }
+            return failures;
+          }
+
+          const original = onMac ? readSetting() : 'not macOS';
+          const rows = [];
+          const failures = [];
+          try {
+            const osStates = onMac ? [false, true] : [null];
+            for (const osOn of osStates) {
+              if (osOn !== null) writeSetting(osOn);
+              for (const [name, engine] of Object.entries(engines)) {
+                const browser = await engine.launch({ headless: true });
+                try {
+                  const version = `${name} ${browser.version()}`;
+                  const os = osOn === null ? 'n/a' : osOn ? 'on' : 'off';
+                  const reading = await measure(browser, null);
+                  let result;
+                  if (!reading.supported) result = 'unsupported: engine does not evaluate prefers-reduced-transparency';
+                  else if (osOn === true && !reading.reports) result = 'unsupported: engine does not report the macOS setting';
+                  else {
+                    const found = judge(`${version} OS ${os}`, reading, reading.reports);
+                    if (osOn === false && reading.reports) found.push(`${version}: reports reduce with Reduce Transparency off`);
+                    failures.push(...found);
+                    result = found.length ? 'FAIL' : reading.reports ? 'pass: opaque fallback' : 'pass: glass gradient';
+                  }
+                  if (name === 'chromium' && osOn === true && !reading.reports) {
+                    failures.push(`${version}: did not report Reduce Transparency from macOS, so the OS path is not covered`);
+                    result = 'FAIL';
+                  }
+                  rows.push({ engine: version, os, mode: 'system', reports: reading.reports ? 'reduce' : 'no-preference', result, themes: reading.themes });
+                  if (name === 'chromium' && osOn !== true) {
+                    for (const value of ['reduce', 'no-preference']) {
+                      const forced = await measure(browser, value);
+                      const found = judge(`${version} emulated ${value}`, forced, value === 'reduce');
+                      if (forced.reports !== (value === 'reduce')) found.push(`${version}: emulated ${value} was not applied`);
+                      failures.push(...found);
+                      rows.push({ engine: version, os, mode: `emulated ${value}`, reports: forced.reports ? 'reduce' : 'no-preference',
+                        result: found.length ? 'FAIL' : value === 'reduce' ? 'pass: opaque fallback' : 'pass: glass gradient', themes: forced.themes });
+                    }
+                  }
+                  if (name === 'webkit') {
+                    rows.push({ engine: version, os, mode: 'emulated reduce', reports: '-', result: 'unsupported: Playwright has no reduced-transparency emulation for WebKit', themes: [] });
+                  }
+                } finally {
+                  await browser.close();
+                }
+              }
+            }
+          } finally {
+            if (onMac && /^[01]$/.test(original)) writeSetting(original === '1');
+            server.close();
+          }
+
+          const table = ['| Engine | macOS Reduce Transparency | Mode | Engine reports | Result |', '| --- | --- | --- | --- | --- |',
+            ...rows.map(row => `| ${row.engine} | ${row.os} | ${row.mode} | ${row.reports} | ${row.result} |`)].join('\n');
+          console.log(table);
+          for (const row of rows) for (const t of row.themes) {
+            console.log(`  ${row.engine} ${row.os} ${row.mode} ${t.theme}: image=${t.backgroundImage.slice(0, 40)} color=${t.backgroundColor} backdrop=${t.backdrop}`);
+          }
+          mkdirSync(artifacts, { recursive: true });
+          writeFileSync(join(artifacts, 'reduced-transparency.json'), JSON.stringify({ passed: failures.length === 0, platform: process.platform, originalSetting: original, rows, failures }, null, 2));
+          if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Reduced transparency\n\n${table}\n`);
+          if (failures.length) {
+            for (const failure of failures) console.log(`::error title=Mac reduced transparency::${failure}`);
+            process.exit(1);
+          }
+          NODE
 
       - name: Check legacy Mac APIs and notebook pinch in both engines
         working-directory: .
