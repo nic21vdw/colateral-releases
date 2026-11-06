@@ -1,0 +1,182 @@
+# DRAFT. Not active: workflows only run from .github/workflows/.
+# Proposal and the account steps it depends on: docs/windows-cloud-signing.md.
+# Before enabling: pin every action to a full commit SHA (release-tooling
+# tests require it), create the windows-release environment, and add its
+# secrets.
+name: Windows release
+run-name: Windows ${{ inputs.tag }} ${{ inputs.source }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Source tag, for example v1.0.80
+        required: true
+      source:
+        description: Full commit SHA the tag names
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: windows-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: github.actor == 'nic21vdw' && github.repository == 'nic21vdw/colateral-releases'
+    runs-on: windows-latest
+    environment: windows-release
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ inputs.tag }}
+      SOURCE: ${{ inputs.source }}
+      COLATERAL_BUILD_SHA: ${{ inputs.source }}
+    steps:
+      - name: Check inputs
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3"; exit 1; }
+          [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]] || { echo "source must be a full commit SHA"; exit 1; }
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          path: tooling
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24.19.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.10
+
+      - name: Check release tooling regressions before private source or secrets
+        timeout-minutes: 3
+        env:
+          PREVIEW_AUTHENTICODE: optional
+          PREVIEW_UPDATER_SIGNATURE: required
+        run: node tooling/scripts/release-tooling-preflight.mjs
+
+      - name: Refuse a stable release, which is immutable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          STATE=$(gh release view "$TAG" --repo nic21vdw/colateral-releases --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')
+          [ "$STATE" != "false false" ] || { echo "$TAG is published stable; cut a new version"; exit 1; }
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: nic21vdw/CoLateral-AI
+          ref: ${{ inputs.tag }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Confirm the tag names the requested source
+        working-directory: candidate
+        run: |
+          [ "$(git rev-parse HEAD)" = "$SOURCE" ] || { echo "$TAG is not $SOURCE"; exit 1; }
+          VERSION=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          [ "v$VERSION" = "$TAG" ] || { echo "source version $VERSION does not match $TAG"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: stable
+
+      - name: Install frozen dependency locks
+        timeout-minutes: 10
+        run: |
+          npm --prefix candidate ci --no-audit --no-fund
+          npm --prefix candidate/apps/desktop ci --no-audit --no-fund
+          npm --prefix candidate/apps/bridge ci --no-audit --no-fund
+
+      - name: Install the pinned signer and check the SDK signtool
+        run: |
+          cargo install artifact-signing-cli --version "$ARTIFACT_SIGNING_CLI_VERSION" --locked
+          ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64/signtool.exe > /dev/null
+          command -v az > /dev/null
+        env:
+          ARTIFACT_SIGNING_CLI_VERSION: ${{ vars.ARTIFACT_SIGNING_CLI_VERSION }}
+
+      - name: Build frontend and bridge assets
+        working-directory: candidate/apps/desktop
+        timeout-minutes: 10
+        run: |
+          node scripts/ensure-tauri-icon.mjs
+          node scripts/sync-app-assets.mjs
+          npx next build
+
+      - name: Check desktop canvas parity
+        working-directory: candidate/apps/desktop
+        timeout-minutes: 8
+        run: npm run test:parity
+
+      - name: Build, Authenticode-sign and updater-sign the NSIS installer
+        working-directory: candidate/apps/desktop
+        timeout-minutes: 40
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          COLATERAL_GOOGLE_CLIENT_ID: ${{ secrets.COLATERAL_GOOGLE_CLIENT_ID }}
+          COLATERAL_GOOGLE_CLIENT_SECRET: ${{ secrets.COLATERAL_GOOGLE_CLIENT_SECRET }}
+          AZURE_ENDPOINT: ${{ vars.AZURE_ENDPOINT }}
+          AZURE_ACCOUNT: ${{ vars.AZURE_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ vars.AZURE_CERT_PROFILE }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          az login --service-principal -u "$AZURE_CLIENT_ID" -p "$AZURE_CLIENT_SECRET" --tenant "$AZURE_TENANT_ID" --allow-no-subscriptions > /dev/null
+          npm run tauri:build:signed -- --bundles nsis --config '{"build":{"beforeBuildCommand":""}}' -- --locked
+          az logout || true
+
+      - name: Prove the installer and app are Authenticode-signed
+        shell: pwsh
+        run: |
+          $bundle = 'candidate/apps/desktop/src-tauri/target/release/bundle/nsis'
+          $setup = Get-ChildItem $bundle -Filter "*_$($env:TAG.Substring(1))_x64-setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw 'no NSIS installer for this version' }
+          foreach ($file in @($setup.FullName, 'candidate/apps/desktop/src-tauri/target/release/CoLateral.exe')) {
+            $sig = Get-AuthenticodeSignature $file
+            if ($sig.Status -ne 'Valid') { throw "$file is $($sig.Status), not Valid" }
+            if (-not $sig.TimeStamperCertificate) { throw "$file has no timestamp" }
+            "$file signed by $($sig.SignerCertificate.Subject)"
+          }
+          if (-not (Test-Path "$($setup.FullName).sig")) { throw 'updater signature missing' }
+
+      - name: Record frozen source and Windows payload hashes
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import { copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+          import { basename, join } from 'node:path';
+          const version = process.env.TAG.slice(1);
+          const dir = 'candidate/apps/desktop/src-tauri/target/release/bundle/nsis';
+          const setup = readdirSync(dir).filter(name => name === `CoLateral_${version}_x64-setup.exe`);
+          if (setup.length !== 1) throw new Error('expected exactly one installer for this version');
+          mkdirSync('windows-payloads', { recursive: true });
+          const files = Object.fromEntries([setup[0], `${setup[0]}.sig`].map(name => {
+            copyFileSync(join(dir, name), join('windows-payloads', basename(name)));
+            return [name, createHash('sha256').update(readFileSync(join(dir, name))).digest('hex')];
+          }));
+          writeFileSync('windows-payloads/build-receipt-windows.json', `${JSON.stringify({ schema: 1, platform: 'windows', source: process.env.SOURCE, version, authenticode: 'verified', files }, null, 2)}\n`);
+          NODE
+
+      - name: Upload immutable Windows assets without changing the release channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for FILE in windows-payloads/*; do
+            NAME=$(basename "$FILE")
+            if gh release view "$TAG" --repo nic21vdw/colateral-releases --json assets --jq '.assets[].name' | grep -qx "$NAME"; then
+              echo "$NAME already on $TAG; refusing to replace an existing asset" >&2
+              exit 1
+            fi
+          done
+          gh release upload "$TAG" --repo nic21vdw/colateral-releases windows-payloads/*

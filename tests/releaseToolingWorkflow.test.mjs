@@ -127,3 +127,21 @@ test('successful tooling evidence makes no build, publication or native installa
     assert.equal(runToolingRegressions({ env: {}, spawn: () => ({ status: 0, stdout: incomplete }) }).ok, false);
   }
 });
+
+test('Apple signing secrets reach only the steps that check, sign or notarise, and never GITHUB_ENV', () => {
+  const text = workflow('macos-release.yml');
+  const steps = text.split('\n      - ').slice(1);
+  const allowed = ['Check Apple signing inputs', "Sign the bridge's native modules", 'Build, sign and notarise the universal DMG'];
+  const holders = steps.filter(step => /secrets\.APPLE_/.test(step)).map(step => step.match(/^name: (.+)$/m)?.[1]);
+  assert.deepEqual(holders, allowed);
+  for (const step of steps) {
+    if (!/GITHUB_ENV/.test(step)) continue;
+    assert.doesNotMatch(step, /APPLE_/, 'no Apple value may be written to GITHUB_ENV');
+  }
+  assert.doesNotMatch(text.split('\n    steps:\n')[0], /APPLE_/, 'no job-level Apple environment');
+  const build = steps.find(step => step.startsWith('name: Build, sign and notarise'));
+  for (const name of ['APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID', 'APPLE_CERTIFICATE', 'APPLE_SIGNING_IDENTITY']) {
+    assert.match(build, new RegExp(`${name}: \\$\\{\\{ secrets\\.${name} \\}\\}`), `${name} must reach the notarising build`);
+  }
+  assert.ok(text.indexOf('name: Check Apple signing inputs') < text.indexOf('name: Build desktop frontend'), 'inputs fail fast before any build');
+});
