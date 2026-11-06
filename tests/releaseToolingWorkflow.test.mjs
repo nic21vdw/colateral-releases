@@ -38,10 +38,12 @@ test('real Git newline and typed TOML fixtures execute automatically before priv
   assert.ok(REGRESSION_TESTS.includes('tests/releaseDispatchGuard.test.mjs'));
 });
 
-test('public tooling CI covers proposed and merged changes on Windows with no private source, secrets or publish permission', () => {
+test('public tooling CI covers proposed and merged changes on Windows and Linux with no private source, secrets or publish permission', () => {
   const text = workflow('release-tooling.yml');
   for (const trigger of ['pull_request:', 'push:', 'workflow_dispatch:']) assert.ok(text.includes(trigger));
-  assert.match(text, /runs-on: windows-latest/);
+  assert.match(text, /runs-on: \$\{\{ matrix\.os \}\}/);
+  assert.match(text, /os: \[windows-latest, ubuntu-24.04\]/);
+  assert.match(text, /fail-fast: false/);
   assert.match(text, /contents: read/);
   assert.match(text, /timeout-minutes: 5/);
   assert.match(text, /run: node scripts\/release-tooling-preflight\.mjs/);
