@@ -42,7 +42,7 @@ test('public tooling CI covers proposed and merged changes on Windows and Linux 
   const text = workflow('release-tooling.yml');
   for (const trigger of ['pull_request:', 'push:', 'workflow_dispatch:']) assert.ok(text.includes(trigger));
   assert.match(text, /runs-on: \$\{\{ matrix\.os \}\}/);
-  assert.match(text, /os: \[windows-latest, ubuntu-latest\]/);
+  assert.match(text, /os: \[windows-latest, ubuntu-24.04\]/);
   assert.match(text, /fail-fast: false/);
   assert.match(text, /contents: read/);
   assert.match(text, /timeout-minutes: 5/);
