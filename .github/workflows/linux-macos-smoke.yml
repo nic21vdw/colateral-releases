@@ -17,7 +17,7 @@ env:
   RELEASES: nic21vdw/colateral-releases
 jobs:
   linux:
-    if: inputs.platforms == 'all' || contains(inputs.platforms, 'linux')
+    if: github.actor == 'nic21vdw' && (inputs.platforms == 'all' || contains(inputs.platforms, 'linux'))
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -107,7 +107,7 @@ jobs:
           cat deb.log || true
 
   macos:
-    if: inputs.platforms == 'all' || contains(inputs.platforms, 'macos')
+    if: github.actor == 'nic21vdw' && (inputs.platforms == 'all' || contains(inputs.platforms, 'macos'))
     runs-on: macos-14
     timeout-minutes: 15
     steps:
