@@ -31,7 +31,7 @@ test('drafts, prereleases, previews and releases without an updater manifest are
 });
 
 test('the workflow repairs latest on every publish with only release write access and no secrets', () => {
-  const text = readFileSync(new URL('../.github/workflows/keep-latest-desktop.yml', import.meta.url), 'utf8');
+  const text = readFileSync(new URL('../.github/workflows/keep-latest-desktop.yml', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   assert.match(text, /release:\n\s+types: \[published, released, edited\]/);
   assert.match(text, /workflow_dispatch:/);
   assert.match(text, /contents: write/);
