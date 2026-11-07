@@ -1,0 +1,8 @@
+{
+  "productName": "QuitProbe",
+  "version": "0.1.0",
+  "identifier": "ai.colateral.quitprobe",
+  "build": { "frontendDist": "dist" },
+  "app": { "windows": [], "security": { "csp": null } },
+  "bundle": { "active": false }
+}
