@@ -174,7 +174,7 @@ jobs:
               || { echo "missing darwin-$ARCH prebuild"; exit 1; }
           done
 
-      - name: Configure Apple signing
+      - name: Check Apple signing inputs
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -183,25 +183,38 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          python3 - <<'PY'
-          import base64
-          import os
-          names = ("APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID")
-          with open(os.environ["GITHUB_ENV"], "a") as output:
-              for name in names:
-                  value = os.environ[name].strip().lstrip("﻿").strip()
-                  if name == "APPLE_CERTIFICATE":
-                      value = "".join(value.split())
-                      base64.b64decode(value, validate=True)
-                  if not value or "\n" in value or "\r" in value:
-                      raise ValueError("Invalid signing input: " + name)
-                  print("::add-mask::" + value)
-                  output.write(name + "=" + value + "\n")
-          PY
+          cat > "$RUNNER_TEMP/apple-signing-env.sh" <<'SH'
+          apple_signing_env() {
+            local name value
+            for name in "$@"; do
+              value="${!name-}"
+              value="${value#"${value%%[![:space:]]*}"}"
+              value="${value#$'\xef\xbb\xbf'}"
+              value="${value#"${value%%[![:space:]]*}"}"
+              value="${value%"${value##*[![:space:]]}"}"
+              if [ "$name" = APPLE_CERTIFICATE ]; then value="${value//[[:space:]]/}"; fi
+              case "$value" in
+                ''|*$'\n'*|*$'\r'*) echo "Invalid signing input: $name" >&2; return 1 ;;
+              esac
+              echo "::add-mask::$value"
+              export "$name=$value"
+            done
+          }
+          SH
+          source "$RUNNER_TEMP/apple-signing-env.sh"
+          apple_signing_env APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > /dev/null \
+            || { echo "Invalid signing input: APPLE_CERTIFICATE is not base64" >&2; exit 1; }
 
       - name: Sign the bridge's native modules
         working-directory: apps/bridge
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
+          source "$RUNNER_TEMP/apple-signing-env.sh"
+          apple_signing_env APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
           KEYCHAIN="$RUNNER_TEMP/bridge-signing.keychain-db"
           KEYCHAIN_PASSWORD=$(uuidgen)
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
@@ -466,9 +479,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           COLATERAL_GOOGLE_CLIENT_ID: ${{ secrets.COLATERAL_GOOGLE_CLIENT_ID }}
           COLATERAL_GOOGLE_CLIENT_SECRET: ${{ secrets.COLATERAL_GOOGLE_CLIENT_SECRET }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          source "$RUNNER_TEMP/apple-signing-env.sh"
+          apple_signing_env APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
           npx tauri build --target universal-apple-darwin \
             --config '{"build":{"beforeBuildCommand":""},"bundle":{"active":true,"targets":["app","dmg"]}}'
+
+      - name: Remove the bridge signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/bridge-signing.keychain-db" 2>/dev/null || true
 
       - name: Prove the app is signed and notarised
         run: |

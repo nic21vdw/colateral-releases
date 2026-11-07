@@ -9,6 +9,7 @@ export const REGRESSION_TESTS = [
   'tests/releaseToolingWorkflow.test.mjs',
   'tests/windows-preview-ownership.test.mjs',
   'tests/releaseAssets.test.mjs',
+  'tests/keepLatestDesktop.test.mjs',
 ];
 
 export function assertPreviewSigningPolicy({ authenticode = 'optional', updaterSignature = 'required' } = {}) {

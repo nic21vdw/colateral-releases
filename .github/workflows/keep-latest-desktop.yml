@@ -1,0 +1,35 @@
+name: Keep latest on the newest desktop release
+
+on:
+  release:
+    types: [published, released, edited]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report the change without making it
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keep-latest-desktop
+  cancel-in-progress: false
+
+jobs:
+  latest:
+    if: github.repository == 'nic21vdw/colateral-releases'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24.19.0
+      - name: Point latest at the newest published desktop release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/keep-latest-desktop.mjs ${{ inputs.dry_run && '--dry-run' || '' }}
