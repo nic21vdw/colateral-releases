@@ -1,3 +1,7 @@
+#[cfg(target_os = "macos")]
+mod mac_terminate;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 use tauri::RunEvent;
 
@@ -34,6 +38,38 @@ fn main() {
                     }
                 }
                 println!("PROBE replaced {n}");
+            }
+            #[cfg(target_os = "macos")]
+            if mode == "terminate" {
+                static ASKED: AtomicUsize = AtomicUsize::new(0);
+                let h = handle.clone();
+                let ok = mac_terminate::install(move || {
+                    let n = ASKED.fetch_add(1, Ordering::SeqCst) + 1;
+                    println!("PROBE should-terminate asked {n}");
+                    if n == 1 {
+                        let h = h.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+                            println!("PROBE confirmed, exiting");
+                            h.exit(0);
+                        });
+                        println!("PROBE held");
+                        true
+                    } else {
+                        false
+                    }
+                });
+                println!("PROBE hook installed {ok}");
+                let h = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(8));
+                    let _ = h.run_on_main_thread(|| unsafe {
+                        use objc2::runtime::AnyObject;
+                        let app: *mut AnyObject = objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+                        println!("PROBE sending terminate:");
+                        let _: () = objc2::msg_send![app, terminate: std::ptr::null_mut::<AnyObject>()];
+                    });
+                });
             }
             app.set_menu(menu)?;
             app.on_menu_event(|app, event| {

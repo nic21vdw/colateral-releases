@@ -37,3 +37,16 @@ jobs:
           echo "===== verdict"
           grep -q "PROBE ExitRequested" predefined.log && echo "predefined Quit DOES emit ExitRequested" || echo "predefined Quit does NOT emit ExitRequested (quit gate is skipped)"
           grep -q "PROBE quit chosen from the menu" custom.log && grep -q "PROBE ExitRequested Some(0)" custom.log && echo "PASS: replacement Quit item reaches the app's handler" || { echo "::error::replacement Quit item did not reach the handler"; exit 1; }
+      - name: terminate (Dock Quit, logout) is asked about and can be held
+        working-directory: probe/quit
+        run: |
+          PROBE_MODE=terminate ./target/debug/quit-probe > terminate.log 2>&1 &
+          PID=$!
+          for i in $(seq 1 30); do kill -0 $PID 2>/dev/null || break; sleep 1; done
+          if kill -0 $PID 2>/dev/null; then echo "still running"; kill $PID; sleep 1; fi
+          cat terminate.log
+          grep -q "PROBE hook installed true" terminate.log || { echo "::error::hook not installed"; exit 1; }
+          grep -q "PROBE should-terminate asked 1" terminate.log || { echo "::error::terminate: never asked the delegate"; exit 1; }
+          grep -q "PROBE confirmed, exiting" terminate.log || { echo "::error::app did not stay up after the hold"; exit 1; }
+          grep -q "PROBE ExitRequested Some(0)" terminate.log && grep -q "PROBE Exit" terminate.log || { echo "::error::confirmed exit did not run the normal exit path"; exit 1; }
+          echo "PASS: terminate: is gated, held, then exits through ExitRequested"
