@@ -12,6 +12,18 @@ on:
       source:
         description: Full commit SHA the tag names
         required: true
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+      source:
+        type: string
+        required: true
+      called:
+        description: Called from desktop-release.yml, which runs the duplicate guard and checks the source itself
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -33,6 +45,7 @@ jobs:
       COLATERAL_BUILD_SHA: ${{ inputs.source }}
     steps:
       - name: Reject an already completed release
+        if: ${{ !inputs.called }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -120,7 +133,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: nic21vdw/CoLateral-AI
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.called && inputs.source || inputs.tag }}
           ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
 
