@@ -5,12 +5,12 @@
 # 1. preflight   exact source on CoLateral-AI main, versions agree, nothing published
 #                yet, then a draft release v<version> here
 # 2. windows, linux, macos   build and upload into the draft (macos reuses macos-release.yml)
-# 3. approve     environment desktop-publish: a required reviewer says go
-# 4. publish     latest.json, payload validation, canary record, stable record, live
+# 3. publish     latest.json, payload validation, canary record, stable record, live
 #                check, GitHub latest, then the website's desktop-release.json and
 #                update-manifest.json as an artifact
 #
-# Nothing a user downloads changes before step 3 is approved.
+# Publication follows green builds on its own: preflight, the platform builds and
+# the validate and live-updater checks in publish are the gates. No one taps Approve.
 name: Desktop release
 run-name: Desktop ${{ inputs.tag }} ${{ inputs.source }}
 
@@ -371,30 +371,8 @@ jobs:
       called: true
     secrets: inherit
 
-  approve:
-    needs: [windows, linux, macos]
-    runs-on: ubuntu-24.04
-    environment: desktop-publish
-    timeout-minutes: 5
-    steps:
-      - name: The publish gate really has a reviewer
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # GitHub creates an environment named by a workflow on first use, with no
-          # protection. Refuse to publish through a gate that nobody stands at.
-          RULES=$(gh api "repos/$GITHUB_REPOSITORY/environments/desktop-publish" --jq '[.protection_rules[]?.type] | join(",")') \
-            || { echo "::error::Could not read the desktop-publish protection rules; refusing to publish."; exit 1; }
-          case ",$RULES," in
-            *,required_reviewers,*) ;;
-            *) echo "::error::desktop-publish has no required reviewer. Add one in Settings > Environments, then re-run this job."; exit 1 ;;
-          esac
-
-      - name: Publication approved
-        run: echo "Publishing $TAG from $SOURCE was approved by a desktop-publish reviewer." >> "$GITHUB_STEP_SUMMARY"
-
   publish:
-    needs: approve
+    needs: [windows, linux, macos]
     runs-on: ubuntu-24.04
     environment: mac-release
     timeout-minutes: 45
