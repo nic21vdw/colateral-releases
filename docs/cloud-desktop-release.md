@@ -13,8 +13,8 @@ way `macos-release.yml` always has.
 2. Dispatch **Desktop release** with `tag` (for example `v1.0.81`) and `source`
    (the full commit SHA on CoLateral-AI `main`). A cloud session can do this
    through the GitHub MCP; the run shows `nic21vdw` as the actor.
-3. The run stops at the `approve` job. Approve the `desktop-publish` deployment
-   in the run page. Nothing a user downloads changes before this.
+3. When all three platform builds are green, `publish` runs on its own. Nothing
+   a user downloads changes before the payload, receipt and signature checks pass.
 4. After `publish` finishes, commit the `website-files-<tag>` artifact to
    CoLateral-AI as `apps/web/desktop-release.json` and
    `apps/web/update-manifest.json` (storefront check 7).
@@ -25,7 +25,6 @@ way `macos-release.yml` always has.
 | `windows` | NSIS installer, updater-signed; Authenticode through Azure Artifact Signing once its six secrets exist, otherwise unsigned with a warning |
 | `linux` | AppImage and Debian package, updater-signed |
 | `macos` | `macos-release.yml` as a reusable workflow (signed, notarised universal DMG with its parity gates) |
-| `approve` | `desktop-publish` environment; refuses if that environment has no required reviewer |
 | `publish` | `latest.json`, payload and receipt validation, prerelease + canary record, stable record, live updater check, GitHub latest, website files |
 
 A failed run is retried with **Re-run failed jobs**. Uploads compare hashes
@@ -37,7 +36,6 @@ with what is already on the draft, so a retry never replaces a payload.
   (the value in `%LOCALAPPDATA%\CoLateral\fulfilment\release-upload-token.txt`
   on the release PC). The deploy key, updater key and Apple secrets are already
   there.
-- Create environment `desktop-publish` with yourself as required reviewer.
 - Optional, for a signed Windows installer: the six Azure values in
   `docs/windows-cloud-signing.md`, added to `mac-release`.
 
