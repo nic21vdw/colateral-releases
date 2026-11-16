@@ -360,6 +360,10 @@ jobs:
               await host.waitFor();
               const frame = await (await host.elementHandle()).contentFrame();
               await frame.locator('html[data-canvas-state="ready"]').waitFor({ timeout: 20000 });
+              if (await frame.evaluate(() => document.documentElement.dataset.canvasPlace) === 'home') {
+                await page.locator('nav.app-rail [data-place="canvas"]').click();
+                await frame.locator('html[data-canvas-place="canvas"]').waitFor({ timeout: 10000 });
+              }
               await frame.locator('.cv-dock').waitFor();
               const themes = [];
               for (const theme of ['light', 'dark', 'nord']) {
