@@ -4,12 +4,28 @@ import { test } from 'node:test';
 
 const workflow = name => readFileSync(new URL(`../.github/workflows/${name}`, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
 const text = workflow('desktop-release.yml');
-const job = name => {
-  const start = text.indexOf(`\n  ${name}:\n`);
+const partialText = workflow('desktop-publish-windows-linux.yml');
+
+function job(name, source = text) {
+  const start = source.indexOf(`\n  ${name}:\n`);
   assert.ok(start > 0, `job ${name} exists`);
-  const next = text.slice(start + 1).search(/\n  [a-z-]+:\n/);
-  return next < 0 ? text.slice(start) : text.slice(start, start + 1 + next);
-};
+  const next = source.slice(start + 1).search(/\n  [a-z-]+:\n/);
+  return next < 0 ? source.slice(start) : source.slice(start, start + 1 + next);
+}
+
+function assertPublishOrder(publish, coverage = '') {
+  const steps = [
+    `desktop-pipeline.mjs validate --dir installers${coverage}`,
+    `desktop-pipeline.mjs canary --dir installers${coverage}`,
+    `--channel stable${coverage}`,
+    `desktop-pipeline.mjs live --dir installers${coverage}`,
+    '--prerelease=false --latest',
+  ];
+  for (const step of steps) assert.ok(publish.includes(step), step);
+  const positions = steps.map(step => publish.indexOf(step));
+  assert.ok(positions.every((position, i) => i === 0 || positions[i - 1] < position),
+    'validate before canary, promote stable, verify live, then mark latest');
+}
 
 test('the run title is what the duplicate guard compares', () => {
   assert.match(text, /^run-name: Desktop \$\{\{ inputs\.tag \}\} \$\{\{ inputs\.source \}\}$/m);
@@ -17,18 +33,14 @@ test('the run title is what the duplicate guard compares', () => {
   assert.ok(job('preflight').indexOf('Reject an already completed release') < job('preflight').indexOf('uses: actions/checkout@'));
 });
 
-test('only the gated publish job can touch the release record or the live channel', () => {
-  for (const name of ['preflight', 'windows', 'linux', 'approve']) {
+test('a full release publishes only after all three builds and payload validation', () => {
+  for (const name of ['preflight', 'windows', 'linux', 'macos']) {
     assert.doesNotMatch(job(name), /FULFILMENT_RELEASE_UPLOAD_TOKEN|desktop-pipeline\.mjs (canary|live)|publish-release-record|--latest|--prerelease=false/, name);
   }
   const publish = job('publish');
-  assert.match(job('approve'), /environment: desktop-publish/);
-  assert.match(job('approve'), /needs: \[windows, linux, macos\]/);
-  assert.match(publish, /needs: approve/);
-  for (const step of ['desktop-pipeline.mjs validate', 'desktop-pipeline.mjs canary', '--channel stable', 'desktop-pipeline.mjs live', '--latest']) assert.ok(publish.includes(step), step);
-  assert.ok(publish.indexOf('desktop-pipeline.mjs validate') < publish.indexOf('desktop-pipeline.mjs canary'));
-  assert.ok(publish.indexOf('desktop-pipeline.mjs canary') < publish.indexOf('--channel stable'));
-  assert.ok(publish.indexOf('--channel stable') < publish.indexOf('--latest'));
+  assert.match(publish, /^    needs: \[windows, linux, macos\]$/m);
+  assert.doesNotMatch(publish, /^    if:/m, 'publish uses the default successful-dependencies condition');
+  assertPublishOrder(publish);
 });
 
 test('every platform builds from the exact source and the mac job reuses the maintained workflow', () => {
@@ -51,7 +63,23 @@ test('secrets stay in the steps that use them and actions are pinned', () => {
   assert.match(job('preflight'), /github\.actor == 'nic21vdw'/);
 });
 
-test('an unprotected publish environment refuses instead of waving the release through', () => {
-  assert.match(job('approve'), /protection_rules/);
-  assert.match(job('approve'), /\*,required_reviewers,\*\) ;;/);
+test('both publishers require the scoped release token before the publish steps', () => {
+  for (const source of [text, partialText]) {
+    const publish = job('publish', source);
+    assert.match(publish, /^    environment: mac-release$/m);
+    assert.match(publish, /^      FULFILMENT_RELEASE_UPLOAD_TOKEN: \$\{\{ secrets\.FULFILMENT_RELEASE_UPLOAD_TOKEN \}\}$/m);
+    assert.match(publish, /\[ -n "\$FULFILMENT_RELEASE_UPLOAD_TOKEN" \] \|\| \{[^\n]+; exit 1; \}/);
+    assert.ok(publish.indexOf('Publish secret is present') < publish.indexOf('uses: actions/checkout@'));
+  }
+});
+
+test('the Windows and Linux publisher only dispatches manually and validates its coverage', () => {
+  const triggers = partialText.split('\npermissions:', 1)[0].split('\non:\n')[1];
+  assert.deepEqual(triggers.match(/^  [a-z_]+:/gm), ['  workflow_dispatch:']);
+  assert.match(partialText, /^  group: desktop-release-\$\{\{ inputs\.tag \}\}$/m);
+  assert.match(partialText, /^  cancel-in-progress: false$/m);
+  const publish = job('publish', partialText);
+  assert.match(publish, /ref: \$\{\{ inputs\.source \}\}/);
+  assert.match(publish, /\[ "\$\(git rev-parse HEAD\)" = "\$SOURCE" \]/);
+  assertPublishOrder(publish, ' --coverage windows-linux');
 });
