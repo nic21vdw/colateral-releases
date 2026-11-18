@@ -1,0 +1,119 @@
+# Publishes a desktop version whose Windows and Linux builds are already in the
+# draft release while the Mac build is blocked (for example on Apple's
+# notarisation agreement). Mac downloads keep the previous installer, Mac update
+# checks see no new version, and the next full release brings Mac back.
+#
+# The source checkout keeps HEAD on the built commit; release tooling (scripts/
+# and services/) comes from CoLateral-AI main so the windows-linux coverage
+# exists.
+name: Desktop publish (Windows + Linux)
+run-name: Desktop ${{ inputs.tag }} Windows + Linux ${{ inputs.source }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag whose draft holds the Windows and Linux builds, for example v1.0.90
+        required: true
+      source:
+        description: Full CoLateral-AI commit SHA the draft was built from
+        required: true
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: desktop-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag }}
+  SOURCE: ${{ inputs.source }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: mac-release
+    timeout-minutes: 45
+    env:
+      FULFILMENT_RELEASE_UPLOAD_TOKEN: ${{ secrets.FULFILMENT_RELEASE_UPLOAD_TOKEN }}
+    steps:
+      - name: Publish secret is present
+        run: |
+          [ -n "$FULFILMENT_RELEASE_UPLOAD_TOKEN" ] || { echo "::error::FULFILMENT_RELEASE_UPLOAD_TOKEN is missing from the mac-release environment."; exit 1; }
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: nic21vdw/CoLateral-AI
+          ref: ${{ inputs.source }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: nic21vdw/CoLateral-AI
+          ref: main
+          path: release-tooling
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Use release tooling from main
+        run: |
+          [ "$(git rev-parse HEAD)" = "$SOURCE" ] || { echo "::error::Source checkout is not $SOURCE"; exit 1; }
+          grep -q "WINDOWS_LINUX_COVERAGE" release-tooling/services/fulfilment/releaseRecord.mjs || { echo "::error::CoLateral-AI main has no windows-linux coverage"; exit 1; }
+          cp -R release-tooling/scripts release-tooling/services .
+          rm -rf release-tooling
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+
+      - name: Download the staged Windows and Linux payloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir installers
+
+      - name: Build the updater manifest
+        run: |
+          notes="$(node apps/desktop/scripts/release-notes.mjs --version "$TAG")"
+          node apps/desktop/scripts/build-updater-manifest.mjs --dir installers --version "$TAG" \
+            --repo "$GITHUB_REPOSITORY" --tag "$TAG" --notes "$notes" --out installers/latest.json
+
+      - name: Validate payloads, receipts and updater signatures
+        run: node scripts/desktop-pipeline.mjs validate --dir installers --coverage windows-linux
+
+      - name: Publish the prerelease and canary record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/desktop-pipeline.mjs canary --dir installers --coverage windows-linux
+
+      - name: Promote the stable release record
+        run: node scripts/publish-release-record.mjs --dir installers --source "$SOURCE" --channel stable --coverage windows-linux
+
+      - name: Confirm the live updater and mark the release latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/desktop-pipeline.mjs live --dir installers --coverage windows-linux
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+          echo "Published $TAG for Windows and Linux from $SOURCE. Mac stays on the previous version. https://colateralai.com/download" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write the website's download files
+        run: |
+          node --input-type=module <<'NODE'
+          import { mkdirSync, readFileSync, readdirSync, writeFileSync, copyFileSync } from 'node:fs';
+          import { downloadRelease } from './scripts/lib/releaseGuards.mjs';
+          const version = process.env.TAG.slice(1);
+          const previous = JSON.parse(readFileSync('apps/web/desktop-release.json', 'utf8'));
+          const next = downloadRelease({ version, stagedFiles: readdirSync('installers'), previous });
+          mkdirSync('website-files', { recursive: true });
+          writeFileSync('website-files/desktop-release.json', `${JSON.stringify({ _comment: previous._comment, ...next }, null, 2)}\n`);
+          copyFileSync('installers/latest.json', 'website-files/update-manifest.json');
+          NODE
+          cat website-files/desktop-release.json >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: website-files-${{ inputs.tag }}
+          path: website-files/
