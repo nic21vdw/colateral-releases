@@ -162,6 +162,11 @@ jobs:
             exit 1
           fi
 
+      - name: The notarisation ticket is stapled to the app
+        run: |
+          xcrun stapler validate "$APP_SRC" || { echo "::error::No stapled ticket on the app, so Gatekeeper has to reach Apple online before it opens."; exit 1; }
+          xcrun stapler validate dl/*.dmg && echo "The dmg is stapled too." || echo "The dmg itself carries no ticket (the app inside does)."
+
       - name: Install to /Applications, quarantined as a download would be
         run: |
           sudo cp -R "$APP_SRC" /Applications/
