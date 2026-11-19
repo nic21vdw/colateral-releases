@@ -1,0 +1,45 @@
+# Asks Apple's notary service, with the exact credentials the Mac release uses,
+# whether this team can notarise right now. Builds nothing and changes nothing.
+# A 403 "required agreement is missing or has expired" means the Account Holder
+# of the CI team still has an agreement to accept in App Store Connect or the
+# developer account. No credential, team ID or submission ID is printed.
+name: Apple notary probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-15
+    environment: mac-release
+    timeout-minutes: 10
+    steps:
+      - name: Ask the notary service for this team's history
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!name}" ] || { echo "::error::$name is missing from the mac-release environment"; exit 1; }
+          done
+          set +e
+          xcrun notarytool history --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --output-format json > "$RUNNER_TEMP/history.json" 2> "$RUNNER_TEMP/history.err"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            count=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1])).get('history', [])))" "$RUNNER_TEMP/history.json")
+            echo "Notary service accepted the CI team's credentials ($count earlier submissions on record). Agreements are in effect." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if grep -qi "agreement" "$RUNNER_TEMP/history.err"; then
+            echo "::error::Apple refused: a required agreement is missing or has expired for the CI team. The Account Holder must accept it."
+          elif grep -qiE "401|unauthori[sz]ed|invalid credentials" "$RUNNER_TEMP/history.err"; then
+            echo "::error::Apple refused the CI credentials (401). The app-specific password or Apple ID in mac-release needs replacing."
+          else
+            echo "::error::notarytool failed with exit $status for another reason."
+          fi
+          exit 1
