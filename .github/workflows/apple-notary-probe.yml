@@ -7,6 +7,11 @@ name: Apple notary probe
 
 on:
   workflow_dispatch:
+    inputs:
+      submit:
+        description: Also upload a tiny placeholder zip (Apple rejects it as not signed); proves submissions are allowed, which is where an expired agreement is refused
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,7 +37,7 @@ jobs:
           set -e
           if [ "$status" -eq 0 ]; then
             count=$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1])).get('history', [])))" "$RUNNER_TEMP/history.json")
-            echo "Notary service accepted the CI team's credentials ($count earlier submissions on record). Agreements are in effect." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Notary service accepted the CI team's credentials ($count earlier submissions on record)." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if grep -qi "agreement" "$RUNNER_TEMP/history.err"; then
@@ -41,5 +46,29 @@ jobs:
             echo "::error::Apple refused the CI credentials (401). The app-specific password or Apple ID in mac-release needs replacing."
           else
             echo "::error::notarytool failed with exit $status for another reason."
+          fi
+          exit 1
+
+      - name: Try a placeholder submission
+        if: inputs.submit
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/probe" && echo "notary probe" > "$RUNNER_TEMP/probe/README.txt"
+          (cd "$RUNNER_TEMP" && /usr/bin/ditto -c -k probe probe.zip)
+          set +e
+          xcrun notarytool submit "$RUNNER_TEMP/probe.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_PASSWORD" --output-format json > "$RUNNER_TEMP/submit.json" 2> "$RUNNER_TEMP/submit.err"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Apple accepted a submission from the CI team. Agreements for notarisation are in effect." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if grep -qi "agreement" "$RUNNER_TEMP/submit.err"; then
+            echo "::error::Apple refused the submission: a required agreement is missing or has expired for the CI team. The Account Holder must accept it."
+          else
+            echo "::error::notarytool submit failed with exit $status for another reason."
           fi
           exit 1
