@@ -1,0 +1,95 @@
+# Nightly Mac parity check for the CoLateral desktop app.
+#
+# CoLateral-AI is private, so its own macOS jobs cost paid minutes and its
+# Actions have been off since September 2026. That left `cfg(target_os =
+# "macos")` Rust compiled only inside a release build, and Mac-only behaviour in
+# the Node tests (WebKit floor, Cmd shortcuts, process groups, voice discovery)
+# run only on Windows, where it is a no-op. This public repository has free
+# macOS minutes and already reads the source through SOURCE_DEPLOY_KEY.
+#
+# Nothing here builds an installer, signs, notarises or publishes. It checks out
+# CoLateral-AI (main, or the ref given), then on macos-15 runs:
+#   1. cargo check and cargo test for apps/desktop/src-tauri
+#   2. every Node test listed in CoLateral-AI tests/mac-parity.json
+# CoLateral-AI owns that list (docs/agents/mac-parity.md), so adding a test
+# there needs no change here.
+
+name: Mac parity
+run-name: Mac parity ${{ inputs.source || 'main' }}
+
+on:
+  schedule:
+    - cron: '30 7 * * *'
+  push:
+    branches: [claude/project-thread-k1b4lb]
+  workflow_dispatch:
+    inputs:
+      source:
+        description: CoLateral-AI branch, tag or commit to check (default main)
+        type: string
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-parity-${{ inputs.source || 'main' }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    if: github.repository == 'nic21vdw/colateral-releases' && (github.event_name == 'schedule' || github.actor == 'nic21vdw')
+    runs-on: macos-15
+    environment: mac-release
+    timeout-minutes: 40
+    env:
+      SOURCE: ${{ inputs.source || (github.event_name == 'push' && 'claude/project-thread-k1b4lb') || 'main' }}
+    steps:
+      - name: Check the requested source
+        shell: bash
+        run: |
+          [[ "$SOURCE" =~ ^[A-Za-z0-9._/-]{1,200}$ ]] && [[ "$SOURCE" != *..* ]] || { echo "::error::source must be a branch, tag or commit"; exit 1; }
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: nic21vdw/CoLateral-AI
+          ref: ${{ env.SOURCE }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24.19.0
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch @ 2026-07-16
+        with:
+          toolchain: stable
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # Tauri validates frontendDist during the build script; the check needs the
+      # directory, not a real Next export.
+      - name: Stub the frontend output directory
+        run: mkdir -p apps/desktop/out
+
+      - name: cargo check (macOS)
+        working-directory: apps/desktop
+        run: npm run rust:check
+
+      - name: cargo test (macOS)
+        working-directory: apps/desktop
+        run: npm run rust:test
+
+      - name: Mac parity Node tests
+        shell: bash
+        run: |
+          [ -f tests/mac-parity.json ] || { echo "::error::$SOURCE has no tests/mac-parity.json"; exit 1; }
+          FAILED=0
+          for TEST in $(node -p "require('./tests/mac-parity.json').tests.join('\n')"); do
+            echo "::group::$TEST"
+            if node "$TEST"; then echo "::endgroup::"; else echo "::endgroup::"; echo "::error file=$TEST::failed on macOS"; FAILED=1; fi
+          done
+          exit $FAILED
