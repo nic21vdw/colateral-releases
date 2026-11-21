@@ -20,8 +20,6 @@ run-name: Mac parity ${{ inputs.source || 'main' }}
 on:
   schedule:
     - cron: '30 7 * * *'
-  push:
-    branches: [claude/project-thread-k1b4lb]
   workflow_dispatch:
     inputs:
       source:
@@ -44,7 +42,7 @@ jobs:
     environment: mac-release
     timeout-minutes: 40
     env:
-      SOURCE: ${{ inputs.source || (github.event_name == 'push' && 'claude/project-thread-k1b4lb') || 'main' }}
+      SOURCE: ${{ inputs.source || 'main' }}
     steps:
       - name: Check the requested source
         shell: bash
